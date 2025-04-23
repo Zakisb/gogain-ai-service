@@ -1,0 +1,54 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Project Context: GoGain AI Coach Microservice
+
+## Overview
+
+This project involves building a dedicated AI microservice in Python to serve as the backend for the "Virtual Coach" feature within the GoGain mobile fitness application. The goal is to create a sophisticated, agentic AI chatbot that acts as a personalized fitness and wellness companion.
+
+## Core Technologies
+
+*   **Language:** Python
+*   **Web Framework:** FastAPI
+*   **AI/Agent Orchestration & RAG:** LlamaIndex
+*   **LLM Interaction:** LiteLLM (to support various models like OpenAI, Anthropic, etc.)
+*   **Primary Data Store:** PostgreSQL (Managed by the existing Node.js backend, accessed via API calls or direct connection if necessary)
+*   **Chat Memory (Planned):** Mem0 (or a similar persistent memory solution integrated with LlamaIndex)
+*   **Vector Database (Planned):** A suitable vector store (e.g., Pinecone, Weaviate, ChromaDB, pgvector) integrated with LlamaIndex for exercise/food RAG.
+
+## Key Goals & Features
+
+*   **Agentic & Personalized Interactions:** Replace rigid chat flows with a flexible, LLM-driven agentic system capable of natural conversation and personalized guidance, acting as a true fitness companion.
+*   **Intelligent Training Program Generation:**
+    *   Create customized training programs based on diverse user goals, such as:
+        *   **Pain Management:** Address specific pain points (shoulder, back, knee, etc.).
+        *   **General Fitness:** Improve overall condition (Cardio, Circuit Training, Mobility).
+        *   **Body Reshaping:** Focus on HIIT, targeted strength training, Circuit Training.
+        *   **Flexibility & Mobility:** Incorporate Pilates, Yoga, Stretching, Mobility exercises.
+        *   **Stress Reduction:** Suggest shorter sessions (30 min max) using HIIT, Circuit Training, Pilates, Stretching.
+        *   **Weight Loss:** Combine diet plans with targeted workouts (30-45 min HIIT, Cardio, Strength Training).
+    *   Utilize **RAG** over an embedded exercise library for efficient and context-aware exercise selection within programs.
+*   **Dynamic Diet Plan Creation:**
+    *   Generate personalized diet plans.
+    *   Potentially use **RAG** over food data for flexible meal suggestions and planning.
+*   **Adaptive Program Management:**
+    *   Allow users to query their programs/plans and request modifications (e.g., exercise swaps due to difficulty, pain, or preference).
+    *   Intelligently **update or adapt** training programs and diet plans based on user feedback, logged performance, or changing goals.
+*   **Contextual & Proactive Engagement:**
+    *   Incorporate **persistent memory** (e.g., using **Mem0**) storing conversation history, user preferences, summarized health data, and past goals for contextual interactions.
+    *   Provide proactive support: workout feedback analysis, nutrition check-ins (potentially analyzing food photos), reminders for sessions or questionnaires, motivational messages.
+    *   Leverage **wearable tracker data** (sleep, HRV, activity) to offer timely tips, adjust training loads, or suggest "movement snacks."
+*   **Comprehensive Fitness Q&A:** Handle user queries about fitness concepts, nutrition, their specific programs, and general wellness.
+*   **Technical Foundation:**
+    *   Adhere to microservice best practices as outlined in [python-rules-02.mdc](mdc:.cursor/rules/python-rules-02.mdc).
+    *   Follow clean coding standards as outlined in [python-rules-01.mdc](mdc:.cursor/rules/python-rules-01.mdc).
+
+## Architecture
+
+*   This Python service operates as a distinct microservice.
+*   It communicates with the main Node.js backend (for accessing structured user data like profiles, workout logs) and potentially directly with the PostgreSQL database or external APIs (like wearable trackers).
+*   It exposes FastAPI endpoints consumed likely by the Node.js backend or potentially an API Gateway.
+This rule provides a high-level overview of the project's purpose, technology stack, and objectives.
