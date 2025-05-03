@@ -12,6 +12,7 @@ load_dotenv(dotenv_path=dotenv_path)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # Add other keys as needed (COHERE_API_KEY, etc.)
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # --- Application Settings ---
 APP_TITLE = "GoGain AI Coach Service"
@@ -21,7 +22,7 @@ APP_VERSION = "0.2.0" # Incremented version
 # --- LlamaIndex / LiteLLM Settings ---
 # Default model to use if not specified elsewhere
 # LiteLLM uses model names like "gpt-3.5-turbo", "claude-3-sonnet-20240229", etc.
-DEFAULT_MODEL = "gpt-3.5-turbo"
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemini/gemini-pro")
 
 # You could add other settings here like embedding models, database URIs, etc.
 # EMBEDDING_MODEL = "text-embedding-ada-002"
@@ -31,3 +32,6 @@ if not OPENAI_API_KEY and not ANTHROPIC_API_KEY: # Check if at least one key is 
      print("Warning: No primary API keys (e.g., OPENAI_API_KEY, ANTHROPIC_API_KEY) found in environment variables.")
      # Consider raising an exception in production if a key is required:
      # raise ValueError("Missing required API keys in environment variables.")
+
+if DEFAULT_MODEL.startswith("gemini/") and not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY missing in environment/.env")
