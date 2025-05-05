@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333" # REST & Web UI
+      - "6334:6334" # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  ai_service:
+    build: . # builds the Dockerfile in the repo root
+    container_name: gogain-ai-service
+    ports:
+      - "8000:8000" # FastAPI exposed to host
+    env_file: .env # DB creds, API keys, etc.
+    depends_on:
+      - qdrant
+    environment:
+      QDRANT_HOST: qdrant # internal DNS name inside the compose network
+      QDRANT_PORT: 6333
+      # add other ENV vars your app needs (OPENAI_API_KEY, etc.)
+
+volumes:
+  qdrant_data:
