@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.core import config
-from app.api import learning, chat
+from app.api import chat
 from llama_index.core.settings import Settings
 from llama_index.llms.litellm import LiteLLM
 from qdrant_client import QdrantClient
@@ -10,9 +10,6 @@ from app.core.qdrant import get_qdrant_client   # <- import
 app = FastAPI()
 client = get_qdrant_client()
 
-
-# Include the learning router
-app.include_router(learning.router, prefix="/api/v1", tags=["Learning"])
 
 # Include the chat router
 app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
