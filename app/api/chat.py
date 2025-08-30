@@ -1,274 +1,341 @@
-# GOGAIN-AI-SERVICE/app/api/chat.py
-from fastapi import APIRouter, HTTPException
+"""Basic chat endpoint using AgentWorkflow with CentralRouterAgent and PainAgent."""
 
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
-import os
 import json
+import asyncio
 from pathlib import Path
+
 from llama_index.core.settings import Settings
 from llama_index.llms.gemini import Gemini
-from llama_index.core.llms import ChatMessage, MessageRole
-
-from app.agents import build_all
-from app.agents.central import build_workflow
+from llama_index.llms.openai import OpenAI
 from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.memory.mem0 import Mem0Memory
 from llama_index.core.agent.workflow import (
-    AgentOutput,
-    ToolCall,
+    AgentInput,
+    AgentOutput, 
+    AgentStream,
+    ToolCall, 
     ToolCallResult,
+    FunctionAgent
 )
-from llama_index.core.workflow import Context
-from llama_index.core.workflow import JsonPickleSerializer, JsonSerializer
 
+from llama_index.core.workflow import Context, JsonSerializer
+import os
+from llama_index.core.agent.workflow import AgentWorkflow
+
+from app.agents.central import build_workflow
+from app.agents.pain import build as build_pain_agent
+from app.core.session_storage import SessionStorage
+from app.api.types import (
+    StreamingEvent,
+    create_start_event,
+    create_status_event,
+    create_agent_start_event,
+    create_token_event,
+    create_tool_calls_event,
+    create_tool_start_event,
+    create_tool_result_event,
+    create_complete_event,
+    create_done_event,
+    create_error_event,
+)
+from llama_index.core.memory import Memory
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define Request/Response models (simplified without user/session IDs for now)
+# Request/Response models
 class ChatRequest(BaseModel):
     message: str
+    user_id: str = "test_user_01"  # Default for development
 
-class ChatResponse(BaseModel):
-    response: str
-
-
-
-
-
-# MEMORY_DIR = Path("app/chat_memory")
-# MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-
-# # --- Configuration for Mock User Data --- Added
-# MOCK_DATA_DIR = Path("app/mock_data")
-# MOCK_DATA_DIR.mkdir(parents=True, exist_ok=True) # Ensure 
-
-# Create an API Router instance
-router = APIRouter(prefix="/chat")                  # no tags
-
-# === Agent Definitions ===
-# NOTE: llm instance will be passed dynamically based on request
-
-# === Chat Endpoint using AgentWorkflow (aka AgentRunner) ===
+# Create API Router and session storage
+router = APIRouter(prefix="/chat")
+session_storage = SessionStorage()
 
 
-# def load_memory_from_file(user_id: str) -> ChatMemoryBuffer:
-#     """Loads chat history for a user from a JSON file."""
-#     memory_file = MEMORY_DIR / f"{user_id}_memory.json"
-#     if memory_file.exists():
-#         try:
-#             with open(memory_file, "r") as f:
-#                 chat_history_data = json.load(f)
-#                 # Recreate ChatMessage objects
-#                 messages = [
-#                     ChatMessage(role=MessageRole(msg["role"]), content=msg["content"])
-#                     for msg in chat_history_data
-#                 ]
-#                 logger.info(f"Loaded {len(messages)} messages from memory for user {user_id}")
-#                 # Consider token limit if loading large histories
-#                 return ChatMemoryBuffer.from_defaults(messages=messages, token_limit=40000)
-#         except (json.JSONDecodeError, KeyError, Exception) as e:
-#             logger.error(f"Failed to load or parse memory file {memory_file}: {e}. Starting fresh.")
-#             # If loading fails, start with empty memory
-#             return ChatMemoryBuffer.from_defaults(token_limit=40000)
-#     else:
-#         logger.info(f"No memory file found for user {user_id}. Starting fresh.")
-#         return ChatMemoryBuffer.from_defaults(token_limit=40000)
-
-# def save_memory_to_file(user_id: str, memory: ChatMemoryBuffer):
-#     """Saves chat history for a user to a JSON file."""
-#     memory_file = MEMORY_DIR / f"{user_id}_memory.json"
-#     messages = memory.get_all()
-#     # Convert ChatMessage objects to JSON serializable dicts
-#     chat_history_data = [
-#         {"role": msg.role.value, "content": msg.content} for msg in messages
-#     ]
-#     try:
-#         with open(memory_file, "w") as f:
-#             json.dump(chat_history_data, f, indent=2)
-#         logger.info(f"Saved {len(messages)} messages to memory for user {user_id}")
-#     except Exception as e:
-#         logger.error(f"Failed to save memory file {memory_file}: {e}")
+def create_mem0_memory(user_id: str, conversation_id: str) -> Mem0Memory:
+    """Create Mem0Memory instance for the given user."""
+    try:
+        # Check if MEM0_API_KEY is set (for Mem0 platform)
+        mem0_api_key = os.getenv("MEM0_API_KEY")
+        if mem0_api_key:
+            # Using Mem0 platform
+            logger.info(f"Initializing Mem0Memory with platform API for user {user_id}")
+            return Mem0Memory.from_client(
+                context={"user_id": user_id, "conversation_id": conversation_id},
+                api_key=mem0_api_key,   
+                search_msg_limit=10  # Number of historical messages for retrieval
+            )
+        else:
+            # Using local Mem0 (fallback)
+            logger.info(f"Initializing Mem0Memory with local config for user {user_id}")
+            return Mem0Memory.from_client(
+                context={"user_id": user_id, "conversation_id": conversation_id},
+                search_msg_limit=10
+            )
+    except Exception as e:
+        logger.warning(f"Failed to create Mem0Memory for user {user_id}: {e}")
+        logger.info("Falling back to local memory only")
+        return None
 
 
-@router.post("", response_model=ChatResponse)
-async def handle_chat(request: ChatRequest):
+def emit_event(event: StreamingEvent) -> str:
+    """Helper function to emit a typed streaming event as Server-Sent Event format."""
+    return f"data: {event.model_dump_json()}\n\n"
+
+@router.post("")
+
+async def handle_chat(request: ChatRequest) -> StreamingResponse:
     """
-    Handles chat interactions using a multi-agent workflow (stateless),
-    streaming and logging events.
+    Streaming chat endpoint with session persistence for context and memory.
+    Always returns Server-Sent Events for real-time response streaming.
+    
+    Returns:
+        StreamingResponse: Server-Sent Events containing typed StreamingEvent objects
+        
+    Event Types:
+        - StartEvent: Initialization
+        - StatusEvent: Processing status updates  
+        - AgentStartEvent: Agent transitions
+        - TokenEvent: Real-time text streaming
+        - ToolCallsEvent: Tool usage notifications
+        - ToolStartEvent: Individual tool start
+        - ToolResultEvent: Individual tool completion
+        - CompleteEvent: Final response with complete text
+        - DoneEvent: Stream completion
+        - ErrorEvent: Error information
     """
+    
+    async def stream_generator():
+        try:
+            logger.info(f"Starting streaming chat for user {request.user_id}: {request.message}")
+            print(f"Request: {request.user_id}")
+            conversation_id = request.user_id
+            
+            # Initialize LLM - Testing OpenAI for finer streaming granularity
+            llm = OpenAI(model="gpt-4o-mini", temperature=0.7)
+            Settings.llm = llm
+            
+            # Load existing session data  
+            existing_context_data = await session_storage.load_context(request.user_id)
+            local_memory = await session_storage.load_memory(request.user_id)
+            chat_history = await session_storage.load_chat_history(request.user_id)
+            
+            # Initialize Mem0 memory for enhanced personalization
+            mem0_memory = create_mem0_memory(request.user_id, conversation_id)
+            
+            # Use Mem0 if available, otherwise fall back to local memory
+            # memory = mem0_memory if mem0_memory else local_memory
+            
+            # yield emit_event(create_status_event(f"Memory system: {'Mem0' if mem0_memory else 'Local'}"))
+            
+            
+            # Build agents
+            pain_agent = build_pain_agent(llm)
+            specialist_agents = [pain_agent]
+            
+            # Build workflow with loaded or 
+            # default state
+            initial_state = existing_context_data.get("global_context", {})
+            workflow = build_workflow(
+                llm,
+                specialist_agents,
+                initial_state={}
+            )
+            
+            # Create or restore context using proper serializers
+            if existing_context_data:
+                try:
+                    ctx = session_storage.restore_context_from_dict(workflow, existing_context_data)
+                    logger.info("Restored context from previous session")
+                    yield emit_event(create_status_event("Context restored"))
+                except Exception as e:
+                    logger.warning(f"Failed to restore context, using fresh: {e}")
+                    ctx = Context(workflow)
+                    yield emit_event(create_status_event("Using fresh context"))
+            else:
+                ctx = Context(workflow)
+                yield emit_event(create_status_event("Using fresh context"))
+            
+            
+            # Run workflow with streaming
+            handler = workflow.run(user_msg=request.message, ctx=ctx)
+            
+            current_agent = None
+            final_response_content = "No response generated."
+            
+            # Stream events as they come
+            async for event in handler.stream_events():
+                # logger.info(f"🔄 Received event: {type(event).__name__}")
+                # logger.debug(f"📋 Full event data: {event}")
+                
+                # # AgentInput: the full message object that begins the agent's execution
+                # if isinstance(event, AgentInput):
+                #     logger.info()
+                #     if hasattr(event, 'current_agent_name'):
+                #         agent_name = event.current_agent_name
+                #         logger.info(f"🤖 Agent name: {agent_name}")
+                #         if agent_name != current_agent:
+                #             current_agent = agent_name
+                #             logger.info(f"🔄 Switching to agent: {current_agent}")
+                #             yield emit_event(create_agent_start_event(current_agent))
+                
+                # AgentStream: real-time streaming output from the agent
+                if isinstance(event, AgentStream):
+                    if hasattr(event, 'delta') and event.delta:
+                        logger.info(f"📤 Streaming token: '{event.delta}'")
+                        # Stream individual tokens as they come
+                        yield emit_event(create_token_event(event.delta))
+                    else:
+                        logger.warning("⚠️ AgentStream event has no delta attribute or delta is empty")
+                
+                # AgentOutput: the complete response from the agent
+                elif isinstance(event, AgentOutput):
+                    if event.response and hasattr(event.response, 'response'):
+                        response_text = str(event.response.response).strip()
+                        logger.info(f"📄 Full response: '{response_text}'")
+                        if response_text:
+                            final_response_content = response_text
+                    elif event.response and hasattr(event.response, 'content'):
+                        response_text = str(event.response.content).strip()
+                        logger.info(f"📄 Response content: '{response_text}'")
+                        if response_text:
+                            final_response_content = response_text
+                    
+                    # Check for tool calls
+                    if event.response and hasattr(event.response, 'tool_calls') and event.response.tool_calls:
+                        tool_names = [call.tool_name for call in event.response.tool_calls]
+                        logger.info(f"🛠️ Tool calls detected: {tool_names}")
+                        yield emit_event(create_tool_calls_event(tool_names))
+                
+                # # ToolCall: which tools were called and with what arguments
+                # elif isinstance(event, ToolCall):
+                #     logger.info(f"🔨 ToolCall: {event.tool_name} with args: {getattr(event, 'tool_kwargs', 'N/A')}")
+                #     yield emit_event(create_tool_start_event(event.tool_name))
+                
+                # # ToolCallResult: the result of a tool call
+                # elif isinstance(event, ToolCallResult):
+                #     logger.info(f"✅ ToolCallResult: {event.tool_name} -> {getattr(event, 'tool_output', 'N/A')}")
+                #     yield emit_event(create_tool_result_event(event.tool_name))
+                
+                # Unknown event type
+                # else:
+                #     logger.warning(f"❓ Unknown event type: {type(event).__name__}")
+            
+            
+            # Save context
+            await session_storage.save_context(request.user_id, ctx)
+            
+            # # Always save local chat history + handle Mem0
+            # if mem0_memory:
+            #     # Mem0 automatically handles persistence, but we still save locally
+            #     logger.info("Using Mem0 - memory automatically persisted")
+                
+            #     # Add current exchange to local memory for local history tracking
+            #     from llama_index.core.llms import ChatMessage, MessageRole
+            #     local_memory.put(ChatMessage(role=MessageRole.USER, content=request.message))
+            #     if final_response_content and final_response_content != "No response generated.":
+            #         local_memory.put(ChatMessage(role=MessageRole.ASSISTANT, content=final_response_content))
+                
+            #     # Save updated local memory 
+            #     await session_storage.save_memory(request.user_id, local_memory)
+            #     logger.info("Saved local chat history alongside Mem0")
+            # else:
+            #     # Save local memory (it already contains the conversation)
+            #     await session_storage.save_memory(request.user_id, local_memory)
+            #     logger.info("Saved local memory to file storage")
+            
+            # Send completion event
+            yield emit_event(create_complete_event(final_response_content))
+            yield emit_event(create_done_event())
+            
+            
+        except Exception as e:
+            logger.error(f"Error in streaming chat endpoint: {e}", exc_info=True)
+            yield emit_event(create_error_event(str(e)))
+            yield emit_event(create_done_event())
+    
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        }
+    )
+
+## create simple endpoint to test the workflow without streaming
+
+
+@router.post("/test")
+async def test_workflow(request: ChatRequest) -> bool:
+    """
+    Test the workflow without streaming.
+    """
+    llm = OpenAI(model="gpt-4o-mini", temperature=0.7)
+    Settings.llm = llm
+    mem0_memory = create_mem0_memory(request.user_id, request.user_id)
+    memory = Memory.from_defaults(session_id=f"session_{request.user_id}", token_limit=400000)
 
    
-    # --- Initialize LLM for this request ---
-    # Using the global default or the one specified in the request
-  
-    # Ensure your GOOGLE_API_KEY is set in the environment before starting the app
-    # e.g. export GOOGLE_API_KEY="your_real_key" (do NOT hard-code secrets)
-
-    # Gemini 2.0 Flash is only available under the "models/" prefix
-    llm = Gemini(model="models/gemini-2.0-flash")
-    Settings.llm = llm
-
-    # Build specialist agents (tools)
-    specialist_agents = build_all(llm)
-
-    # Build a multi-agent workflow with shared state
-    workflow = build_workflow(
-        llm,
-        specialist_agents,
-        initial_state={
-            "pain_summary": None,
-            "training_plan": None,
-            "diet_plan": None,
-        },
+    review_agent = FunctionAgent(
+        name="ReviewAgent",
+        description="Reviews a report and gives feedback.",
+        system_prompt="You are a reviewer…",  # etc.
+        llm=llm,
+        tools=[],
+        can_handoff_to=["WriteAgent"],
     )
+
+    workflow = AgentWorkflow(
+        agents=[review_agent],
+        root_agent=review_agent.name,
+    )
+
+    # ------------------------------------------------------------
+    # Very simple file-based context persistence for demonstration
+    # ------------------------------------------------------------
+    # Use JsonPickleSerializer so complex objects (e.g. Mem0Memory) are serialised safely
+    # from llama_index.core.workflow import JsonPickleSerializer
+    # serializer = JsonPickleSerializer()
+    # context_file = Path("test_workflow_context.json")
+
+    # if context_file.exists():
+    #     # Load previously saved context
+    #     with context_file.open("r") as f:
+    #         context_data = json.load(f)
+    #     try:
+    #         ctx = Context.from_dict(workflow, context_data, serializer=serializer)
+    #         logger.info("Loaded context from file for /test workflow")
+    #     except Exception as e:
+    #         logger.warning(f"Failed to restore context, starting fresh: {e}")
+    #         ctx = Context(workflow)
+    # else:
+    #     # No saved context yet
+    #     ctx = Context(workflow)
+    #     logger.info("No saved context found – starting fresh")
     ctx = Context(workflow)
-    memory = ChatMemoryBuffer.from_defaults(token_limit=40000)
-    # memory.put(ChatMessage(role="user", content="Hello, world!"))
-    # memory.put(ChatMessage(role="assistant", content="Hello, world to you too!"))
-    # 
+    # Run workflow
+    response = await workflow.run(user_msg=request.message, ctx=ctx, memory=memory)
 
-    # logger.info("Running AgentWorkflow with streaming...")
-    # # Get the async task handler
-    handler = await workflow.run(request.message,  ctx=ctx, memory=memory)
+    # Save updated context back to file so it can be reused next time
+    # try:
+    #     # Convert context to dict first, then drop volatile memory entry
+    #     context_payload = ctx.to_dict(serializer=serializer)
 
-    print(f"Handler: {handler}")
-    final_response_content = "No response generated."
+    #     with context_file.open("w") as f:
+    #         json.dump(context_payload, f, indent=2)
+    #     logger.info("Context saved to file for /test workflow")
+    # except Exception as e:
+    #     logger.error(f"Failed to save context: {e}")
 
-    response2 = await workflow.run(user_msg="What's my name?", ctx=ctx, memory=memory)
-    print(response2)
-    ctx_dict = ctx.to_dict(serializer=JsonSerializer())
-    print(f"Context: {ctx_dict}")
-    chat_history = memory.get()
-    print(f"Chat History: {chat_history}")
-
-
-    # Stream events asynchronously
-    # async for event in handler.astream_events():
-    #     # Check for agent transitions using WorkflowStepEvent context
-    #     if isinstance(event, WorkflowStepEvent) and event.step_context:
-    #         agent_name = event.step_context.current_agent_name
-    #         if agent_name != current_agent:
-    #             current_agent = agent_name
-    #             logger.info(f"\n{'='*30} Agent Start: {current_agent} {'='*30}\n")
-    #     # Log Agent Output
-    #     elif isinstance(event, AgentOutput):
-    #         if event.response and event.response.response: # Check response exists
-    #             response_text = event.response.response.strip()
-    #             if response_text:
-    #                 logger.info(f"📤 Agent Output ({current_agent}): {response_text}")
-    #                 # Capture the latest non-empty response content as the final one
-    #                 final_response_content = response_text
-    #         # Log planned tool calls (if any)
-    #         if event.response and event.response.tool_calls:
-    #             tool_names = [call.tool_name for call in event.response.tool_calls]
-    #             logger.info(f"🛠️ Planning to use tools: {tool_names}")
-    #     # Log Tool Calls
-    #     elif isinstance(event, ToolCall):
-    #         logger.info(f"🔨 Calling Tool: {event.tool_name}")
-    #         logger.info(f"  With arguments: {event.tool_kwargs}")
-    #     # Log Tool Results
-    #     elif isinstance(event, ToolCallResult):
-    #         logger.info(f"🔧 Tool Result ({event.tool_name}):")
-    #         # Be cautious logging potentially large/sensitive tool outputs fully
-    #         # logger.info(f"  Output: {event.tool_output}")
-    #         logger.info(f"  Output: [Result received for {event.tool_name}]")
-
-
-    # logger.info("Workflow finished.")
-    # logger.info(f"Final response captured: {final_response_content}")
-
-    return ChatResponse(response=final_response_content)
-
-
-
-
-
-# @router.post("", response_model=ChatResponse)
-# async def handle_chat(request: ChatRequest):
-#     """
-#     Handles chat interactions using a multi-agent workflow,
-#     using simple file-based persistence for chat memory based on user_id.
-#     Loads mock user data if available.
-#     """
-#     logger.info(f"Received chat request for user_id: {request.user_id}")
-
-#     # --- Load Mock User Data --- Modified section
-#     user_mock_data = {} # Default to empty dict
-#     mock_file_path = MOCK_DATA_DIR / f"{request.user_id}.json"
-#     if mock_file_path.exists():
-#         try:
-#             with open(mock_file_path, 'r') as f:
-#                 user_mock_data = json.load(f)
-#             logger.info(f"Loaded mock data for user {request.user_id} from {mock_file_path}")
-#         except (json.JSONDecodeError, Exception) as e:
-#             logger.error(f"Failed to load or parse mock data file {mock_file_path}: {e}. Proceeding without mock data.")
-#             user_mock_data = {} # Reset on error
-#     else:
-#         logger.info(f"No mock data file found for user {request.user_id} at {mock_file_path}. Proceeding without mock data.")
-
-
-#     # --- Initialize LLM (as before) ---
-#     # Consider initializing LLM outside the request handler if it's always the same
-#     llm = Gemini(model="models/gemini-2.0-flash")
-#     Settings.llm = llm
-
-#     # --- Build Agents (as before) ---
-#     specialist_agents = build_all(llm)
-#     # --- Prepare Initial Workflow State (Include mock data if loaded) ---
-#     initial_state = {
-#         "user_profile": user_mock_data,
-#         "pain_summary": None,
-#         "training_plan": None,
-#         "diet_plan": None,
-#     }
-
-
-
-#     # --- Build Workflow (as before) ---
-#     workflow = build_workflow(
-#         llm,
-#         specialist_agents,
-#         initial_state=initial_state,
-#     )
-
-#     # --- Manage Memory (Using File Persistence) ---
-#     ctx = Context(workflow)
-#     memory = load_memory_from_file(request.user_id)
-
-
-#     # --- Run Workflow ---
-#     logger.info("Running AgentWorkflow...")
-#     final_response_content = "Error: Workflow did not produce a response."
-
-#     try:
-#         output: AgentOutput = await workflow.run(
-#             input=request.message,
-#             ctx=ctx,
-#             memory=memory
-#         )
-
-#         if isinstance(output, AgentOutput):
-#             if output.response:
-#                 final_response_content = str(output.response).strip()
-#                 print(f"[DEBUG] Extracted response from AgentOutput: {final_response_content}")
-#             else:
-#                 final_response_content = "[AgentOutput received, but .response attribute was empty]"
-#                 logger.warning(f"AgentOutput received, but .response was empty. Output object: {output}")
-#         else:
-#             logger.warning(f"Workflow output was not an AgentOutput object. Type: {type(output)}, Value: {output}")
-#             final_response_content = f"[Unexpected workflow output type: {type(output)}]"
-
-#         logger.info(f"Workflow finished. Captured response attempt: {final_response_content}")
-
-#         save_memory_to_file(request.user_id, memory)
-
-#     except Exception as e:
-#         logger.error(f"Error running workflow or handling memory for user {request.user_id}: {e}", exc_info=True)
-#         raise HTTPException(status_code=500, detail="Internal server error during chat processing.")
-
-#     if not final_response_content:
-#         final_response_content = "[No response generated]"
-
-
+    
+    print(response)
+    
+    return True

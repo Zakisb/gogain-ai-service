@@ -6,11 +6,8 @@ and returns a configured `FunctionAgent` instance ready to route messages.
 """
 
 from typing import List
-import os
-from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.llms.litellm import LiteLLM
-from llama_index.core.agent.workflow import AgentWorkflow
-from llama_index.llms.gemini import Gemini
+from llama_index.core.agent.workflow import FunctionAgent, AgentWorkflow
+from llama_index.core.base.llms.base import BaseLLM
 
 _DESCRIPTION = (
     "Primary agent responsible for understanding user intent, routing requests "
@@ -20,21 +17,18 @@ _DESCRIPTION = (
 _SYSTEM_PROMPT = """
 You are the central AI coordinator for the GoGain virtual fitness coach.
 Your primary role is to understand the user's message and delegate the task to
-one of the specialist agents available as *tools*:
+the appropriate specialist agent:
 - PainAssessmentAgent: Handle pain, discomfort, injury discussions.
-- PersonalTrainingAgent: Create, modify, or discuss exercise programs.
-- NutritionAgent: Handle diet plans, nutrition questions, meal adjustments.
-- HealthInsightsAgent: Interpret wearable data and recovery metrics.
-- GeneralQAAgent: Anything else (fitness concepts, casual chat).
 
-When delegation is needed, call the appropriate tool. If no delegation is
-needed, answer directly. Maintain a friendly, supportive coaching tone and give
-medical disclaimers when necessary (no diagnoses).
+For pain-related queries, delegate to PainAssessmentAgent. For simple greetings 
+or general conversation, respond directly. Keep your responses friendly and supportive.
+If medical topics come up, remind users to consult healthcare professionals for 
+proper diagnosis.
 """
 
   
 
-def build_router(llm: LiteLLM, tools: List[FunctionAgent]) -> FunctionAgent:
+def build_router(llm: BaseLLM, tools: List[FunctionAgent]) -> FunctionAgent:
     """Create the CentralRouterAgent (FunctionAgent)."""
 
     # Build the router with explicit constructor so we can control advanced knobs
@@ -55,7 +49,7 @@ def build_router(llm: LiteLLM, tools: List[FunctionAgent]) -> FunctionAgent:
 
 
 def build_workflow(
-    llm: LiteLLM, tools: List[FunctionAgent], initial_state: dict | None = None
+    llm: BaseLLM, tools: List[FunctionAgent], initial_state: dict | None = None
 ) -> AgentWorkflow:
     """Return an `AgentWorkflow` with the central router as root.
 
