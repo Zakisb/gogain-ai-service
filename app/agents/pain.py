@@ -6,7 +6,7 @@ or giving medical diagnoses – that is delegated to other agents.
 """
 
 from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.llms.litellm import LiteLLM
+from llama_index.core.base.llms.base import BaseLLM
 
 _DESCRIPTION = (
     "Specialized in assessing user-reported pain related to fitness and exercise. "
@@ -34,7 +34,7 @@ injury, or discomfort. Follow these rules:
 """
 
 
-def build(llm: LiteLLM) -> FunctionAgent:  # noqa: D401 – simple factory
+def build(llm: BaseLLM) -> FunctionAgent:  # noqa: D401 – simple factory
     """Factory that returns a configured PainAssessmentAgent instance."""
 
     return FunctionAgent(
