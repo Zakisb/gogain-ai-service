@@ -1,0 +1,55 @@
+# Core Web Framework
+fastapi==0.116.1
+fastapi-cli==0.0.8
+uvicorn==0.35.0
+h11==0.14.0
+httptools==0.6.4
+pydantic==2.11.9
+
+# Environment & Configuration
+python-dotenv==1.1.1
+
+# LlamaIndex Core
+llama-index==0.12.52
+llama-index-core==0.12.52.post1
+llama-index-agent-openai==0.4.12
+llama-index-llms-openai==0.4.7
+llama-index-llms-litellm==0.5.1
+
+# LLM Integration
+litellm==1.76.1
+
+# OpenAI Integration
+openai==1.99.9
+
+# Memory Systems
+mem0ai==0.1.116
+
+# Embeddings
+llama-index-embeddings-voyageai==0.3.0
+voyageai==0.2.4
+llama-index-embeddings-openai==0.3.1
+
+# Vector Databases (Qdrant only)
+qdrant-client==1.15.1
+llama-index-vector-stores-qdrant==0.6.1
+
+# Caching
+redis==5.0.8
+
+# File Processing
+llama-index-readers-file==0.4.11
+
+# Core Tools & Query Engine
+llama-index-program-openai==0.3.2
+llama-index-question-gen-openai==0.3.1
+
+# Database (for SQLAlchemy usage in examples)
+sqlalchemy==2.0.43
+
+# Standard Library Enhancements
+requests==2.32.5
+
+# to fix streaming issue inside docker
+uvicorn[standard]
+hypercorn
