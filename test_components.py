@@ -3,10 +3,22 @@
 """Test individual knowledge system components in isolation."""
 
 import sys
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Add app to Python path
 sys.path.append(str(Path(__file__).parent))
+
+# Initialize LlamaIndex settings
+from llama_index.core.settings import Settings
+from llama_index.llms.openai import OpenAI
+from app.core import config
+
+Settings.llm = OpenAI(model=config.DEFAULT_MODEL)
 
 
 def test_document_processor():
@@ -16,8 +28,8 @@ def test_document_processor():
     try:
         from app.knowledge.document_processor import DocumentProcessor
         
-        # Initialize processor
-        processor = DocumentProcessor()
+        # Initialize processor without LLM-based extractors to avoid rate limits
+        processor = DocumentProcessor(llm=None)
         print("✅ DocumentProcessor initialized")
         
         # Test document loading
@@ -127,8 +139,8 @@ def test_knowledge_manager():
     try:
         from app.knowledge.knowledge_manager import KnowledgeManager
         
-        # Initialize knowledge manager
-        km = KnowledgeManager()
+        # Initialize knowledge manager without LLM to avoid rate limits
+        km = KnowledgeManager(llm=None)
         print("✅ KnowledgeManager initialized")
         
         # Test available knowledge bases
@@ -157,7 +169,7 @@ def test_end_to_end_processing():
     try:
         from app.knowledge.knowledge_manager import KnowledgeManager
         
-        km = KnowledgeManager()
+        km = KnowledgeManager(llm=None)
         
         # Process document with a unique name for testing
         doc_path = "documents/shoulder_pain_final_report.md"

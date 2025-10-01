@@ -3,8 +3,12 @@
 from typing import Optional
 from llama_index.core import Settings
 from llama_index.embeddings.voyageai import VoyageEmbedding
-from llama_index.embeddings.openai import OpenAIEmbedding
+# from llama_index.embeddings.openai import OpenAIEmbedding
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 
 class EmbeddingConfig:
@@ -46,11 +50,8 @@ def get_embedding_model(model_name: Optional[str] = None) -> object:
             input_type=EmbeddingConfig.VOYAGE_INPUT_TYPE
         )
     elif model_name.startswith("text-embedding"):
-        # OpenAI models (fallback)
-        return OpenAIEmbedding(
-            model=model_name,
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        # OpenAI models (fallback) - temporarily disabled
+        raise ValueError("OpenAI embedding support temporarily disabled")
     else:
         # Default behavior: try Voyage AI first, then fallback to OpenAI
         if voyage_api_key:
@@ -60,11 +61,8 @@ def get_embedding_model(model_name: Optional[str] = None) -> object:
                 input_type=EmbeddingConfig.VOYAGE_INPUT_TYPE
             )
         else:
-            # Fallback to OpenAI if no Voyage AI key
-            return OpenAIEmbedding(
-                model="text-embedding-3-small",
-                api_key=os.getenv("OPENAI_API_KEY")
-            )
+            # Fallback disabled - only support Voyage AI for now
+            raise ValueError("VOYAGE_API_KEY required for embedding functionality")
 
 
 def configure_global_embedding():

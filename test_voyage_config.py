@@ -5,9 +5,11 @@
 import sys
 import os
 from pathlib import Path
+from dotenv import load_dotenv # Import the library
 
 # Add app to Python path
 sys.path.append(str(Path(__file__).parent))
+load_dotenv()
 
 
 def test_voyage_config():

@@ -50,7 +50,7 @@ huggingface-hub==0.30.2
 hyperframe==6.1.0
 idna==3.10
 importlib_metadata==8.6.1
-ipython==9.2.0
+#ipython==9.2.0
 ipython_pygments_lexers==1.1.1
 itsdangerous==2.2.0
 jedi==0.19.2
@@ -81,7 +81,7 @@ llama-index-question-gen-openai==0.3.0
 llama-index-readers-file==0.4.7
 llama-index-readers-llama-parse==0.4.0
 llama-index-utils-workflow==0.3.1
-llama-index-vector-stores-qdrant==0.6.0
+llama-index-vector-stores-pinecone==0.4.0
 llama-parse==0.6.12
 markdown-it-py==3.0.0
 MarkupSafe==3.0.2
@@ -97,7 +97,7 @@ numpy==2.2.5
 openai==1.75.0
 orjson==3.10.16
 packaging==25.0
-pandas==2.2.3
+#pandas==2.2.3
 parso==0.8.4
 pathspec==0.12.1
 pexpect==4.9.0
@@ -126,7 +126,7 @@ python-multipart==0.0.20
 pytz==2025.2
 pyvis==0.3.2
 PyYAML==6.0.2
-qdrant-client==1.14.2
+pinecone-client==5.0.1
 referencing==0.36.2
 regex==2024.11.6
 requests==2.32.3

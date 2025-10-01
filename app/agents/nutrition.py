@@ -1,7 +1,7 @@
 """NutritionAgent definition – handles diet planning and meal adjustments."""
 
 from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.llms.litellm import LiteLLM
+from llama_index.core.base.llms.base import BaseLLM
 
 _DESCRIPTION = (
     "Designs and updates personalised diet plans aligned with the user's goals, "
@@ -11,6 +11,11 @@ _DESCRIPTION = (
 
 _SYSTEM_PROMPT = """
 You are the NutritionAgent for the GoGain virtual coach.
+
+**AVAILABLE TOOL:**
+- `get_current_date()`: Call this tool whenever you need the current date (YYYY-MM-DD format).
+  Use it for meal planning, tracking dietary changes, or any temporal context.
+
 Responsibilities:
 1. Create a macro- and calorie-aligned diet plan based on the training goal.
 2. Allow substitutions while maintaining nutritional targets.
@@ -20,12 +25,21 @@ Output diet plans with a ```json diet_plan``` block for storage.
 """
 
 
-def build(llm: LiteLLM):
-    return FunctionAgent.from_defaults(
-        fn_handler=None,
+def build(llm: BaseLLM) -> FunctionAgent:
+    import logging
+
+    logger = logging.getLogger(__name__)
+    from app.tools.date_tool import get_date_tool
+    logger.info("🏗️ Building NutritionAgent with date tool")
+
+    agent = FunctionAgent(
         name="NutritionAgent",
         description=_DESCRIPTION,
         system_prompt=_SYSTEM_PROMPT,
         llm=llm,
-        tools=[],
-    ) 
+        tools=[get_date_tool()],
+        verbose=True,
+    )
+
+    logger.info("✅ NutritionAgent created successfully")
+    return agent 

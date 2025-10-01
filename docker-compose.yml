@@ -1,27 +1,53 @@
-version: "3.8"
+version: "3.9"
 
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
+  redis:
+    image: redis:7-alpine
+    container_name: gogain-redis
     ports:
-      - "6333:6333" # REST & Web UI
-      - "6334:6334" # gRPC
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - gogain_network
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    container_name: gogain-qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC API
     volumes:
-      - qdrant_data:/qdrant/storage
+      - qdrant_storage:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - gogain_network
+    healthcheck:
+      disable: true   # 👈 disable healthcheck to avoid "unhealthy" status
 
   ai_service:
-    build: . # builds the Dockerfile in the repo root
+    build: .
+    image: gogain-ai-service:latest
     container_name: gogain-ai-service
-    ports:
-      - "8000:8000" # FastAPI exposed to host
-    env_file: .env # DB creds, API keys, etc.
-    depends_on:
-      - qdrant
+    env_file: .env
     environment:
-      QDRANT_HOST: qdrant # internal DNS name inside the compose network
-      QDRANT_PORT: 6333
-      # add other ENV vars your app needs (OPENAI_API_KEY, etc.)
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+      - NO_PROXY=qdrant,localhost,127.0.0.1,::1
+      - no_proxy=qdrant,localhost,127.0.0.1,::1
+    depends_on:
+      - redis
+      - qdrant
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - gogain_network
+    volumes:
+      - ./:/app
 
 volumes:
-  qdrant_data:
+  qdrant_storage:
+
+networks:
+  gogain_network:
+    driver: bridge

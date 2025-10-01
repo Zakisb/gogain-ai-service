@@ -7,7 +7,8 @@ for exercise selection.
 """
 
 from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.llms.litellm import LiteLLM
+from llama_index.core.base.llms.base import BaseLLM
+# Training agent tools temporarily disabled (tools.py removed)
 
 _DESCRIPTION = (
     "Creates and updates personalised exercise programs. Incorporates user goals, "
@@ -16,25 +17,46 @@ _DESCRIPTION = (
 
 _SYSTEM_PROMPT = """
 You are the PersonalTrainingAgent for the GoGain virtual coach.
-Your tasks:
-1. Given the user's goals and constraints, craft a structured workout plan
-   (days per week, session length, exercise list with sets/reps).
-2. Always check for an existing pain_summary (recent < 30 days). If missing,
-   instruct the CentralRouter to initiate PainAssessmentAgent first.
-3. When pain_summary is present, exclude or modify exercises that aggravate
-   those areas.
-4. Output plans as Markdown with a JSON metadata block labelled
-   ```json training_plan``` for downstream storage.
-5. Do not handle nutrition – that belongs to NutritionAgent.
+
+**YOUR ONLY PURPOSE: Create and modify workout plans**
+
+**AVAILABLE TOOL:**
+- `get_current_date()`: Call this tool whenever you need the current date (YYYY-MM-DD format).
+  Use it for scheduling, tracking plan start dates, checking pain_summary recency (<30 days), etc.
+
+WHAT YOU DO:
+1. Create structured workout plans (days per week, session length, exercise list with sets/reps)
+2. Always check for existing pain_summary (recent < 30 days) before creating plans
+3. If no pain_summary exists, instruct user to get pain assessment first
+4. Exclude/modify exercises that aggravate existing pain conditions
+5. Output plans as Markdown with JSON metadata block: ```json training_plan```
+
+WHAT YOU DON'T DO:
+- Answer general fitness questions
+- Provide exercise advice without creating a plan
+- Handle nutrition topics
+- Conduct pain assessments
 """
 
 
-def build(llm: LiteLLM):
-    return FunctionAgent(
+def build(llm: BaseLLM) -> FunctionAgent:
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Training agent tools temporarily disabled (tools.py removed)
+    from app.tools.date_tool import get_date_tool
+    tools = [get_date_tool()]
+
+    logger.info("🏗️ Building PersonalTrainingAgent with %d tools", len(tools))
+
+    agent = FunctionAgent(
         name="PersonalTrainingAgent",
         description=_DESCRIPTION,
         system_prompt=_SYSTEM_PROMPT,
         llm=llm,
-        tools=[],  # Exercise-search tool will be plugged in later
-        can_handoff_to=[],
-    ) 
+        tools=tools,
+        verbose=True,
+    )
+
+    logger.info("✅ PersonalTrainingAgent created successfully")
+    return agent 

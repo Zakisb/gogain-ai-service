@@ -2,11 +2,8 @@
 """Knowledge base management for pain assessment and training guidance."""
 
 from .document_processor import DocumentProcessor
-from .knowledge_manager import KnowledgeManager
-from .embeddings_pipeline import EmbeddingsPipeline
+# Removed embeddings_pipeline - functionality migrated to other modules
 
 __all__ = [
     "DocumentProcessor",
-    "KnowledgeManager", 
-    "EmbeddingsPipeline",
 ] 

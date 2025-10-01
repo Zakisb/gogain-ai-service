@@ -51,12 +51,16 @@ class DocumentProcessor:
     
     def _setup_extractors(self):
         """Setup metadata extractors."""
-        self.metadata_extractors = [
-            TitleExtractor(nodes=5),
-            QuestionsAnsweredExtractor(questions=3),
-            KeywordExtractor(keywords=10),
-            SummaryExtractor(summaries=["prev", "self"]),
-        ]
+        if self.llm is not None:
+            self.metadata_extractors = [
+                TitleExtractor(nodes=5, llm=self.llm),
+                QuestionsAnsweredExtractor(questions=3, llm=self.llm),
+                KeywordExtractor(keywords=10, llm=self.llm),
+                SummaryExtractor(summaries=["prev", "self"], llm=self.llm),
+            ]
+        else:
+            # Skip LLM-based extractors when no LLM is provided
+            self.metadata_extractors = []
         
     
     def load_document(self, file_path: str) -> List[Document]:
@@ -157,30 +161,27 @@ class DocumentProcessor:
         return all_nodes
     
     def _add_pain_assessment_metadata(self, node: BaseNode):
-        """Add custom metadata for pain assessment context.
-        
+        """Add minimal metadata for pure semantic retrieval - NO KEYWORD MATCHING.
+
         Args:
             node: Node to add metadata to
         """
-        text = node.get_content().lower()
-        
-        # Identify question nodes
-        if "«" in text and "»" in text:
-            node.metadata["contains_questions"] = True
-            questions = re.findall(r'«([^»]+)»', text)
-            node.metadata["question_count"] = len(questions)
-        
-        # Identify red flag sections
-        if any(term in text for term in ["urgence", "médical", "consultation", "fracture", "luxation"]):
-            node.metadata["contains_red_flags"] = True
-        
-        # Identify exercise criteria sections
-        if any(term in text for term in ["exercice", "renforcement", "étirement", "mobilisation"]):
-            node.metadata["contains_exercise_info"] = True
-        
-        # Identify assessment criteria
-        if any(term in text for term in ["évaluation", "diagnostic", "symptôme", "douleur"]):
-            node.metadata["contains_assessment_info"] = True
+        original_text = node.get_content()
+
+        # Only detect French questions structurally (no keyword classification)
+        if "«" in original_text and "»" in original_text:
+            questions = re.findall(r'«([^»]+)»', original_text)
+            if questions:
+                node.metadata["contains_questions"] = True
+                node.metadata["question_count"] = len(questions)
+                node.metadata["extracted_questions"] = questions[:3]
+                # Let semantic search handle question type classification
+
+        # Add basic structural information only
+        node.metadata["chunk_length"] = len(original_text)
+        node.metadata["has_structured_content"] = bool(re.search(r'^#+\s', original_text, re.MULTILINE))
+
+        # Remove all keyword-based classification - let embeddings handle semantic understanding
     
     def process_file(self, file_path: str) -> List[BaseNode]:
         """Complete processing pipeline for a single file.

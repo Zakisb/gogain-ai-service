@@ -13,9 +13,9 @@ GoGain AI Coach is a Python microservice built with FastAPI that provides AI-pow
 - **Framework**: FastAPI for REST API
 - **AI Orchestration**: LlamaIndex for RAG and agent workflows
 - **LLM Integration**: LiteLLM supporting OpenAI, Anthropic, Google Gemini
-- **Vector Database**: Qdrant for knowledge embeddings
+- **Vector Database**: Pinecone for knowledge embeddings
 - **Embeddings**: Voyage AI (primary) or OpenAI (fallback)
-- **Memory**: Persistent chat memory with JSON storage
+- **Memory**: Persistent chat memory with JSON storage (migrating to Mem0 for enhanced AI agent memory)
 - **Containerization**: Docker with docker-compose for local development
 
 ### Agent System
@@ -31,7 +31,7 @@ The service implements a multi-agent architecture with:
 Located in `app/knowledge/`:
 
 - **DocumentProcessor**: Hierarchical parsing of medical/fitness documents
-- **EmbeddingsPipeline**: Vector embedding and Qdrant collection management
+- **EmbeddingsPipeline**: Vector embedding and Pinecone index management
 - **KnowledgeManager**: High-level orchestration and caching
 
 ## Common Development Commands
@@ -41,20 +41,17 @@ Located in `app/knowledge/`:
 ```bash
 # Create virtual environment and install dependencies
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  
 pip install -r requirements.txt
 ```
 
 ### Running the Service
 
 ```bash
-# Start Qdrant vector database
-docker-compose up qdrant -d
-
-# Run FastAPI development server
+# Run FastAPI development server (Pinecone is cloud-hosted)
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Or run with full Docker setup
+# Or run with Docker setup
 docker-compose up
 ```
 
@@ -80,8 +77,8 @@ python scripts/embed_documents.py test shoulder --query "What causes shoulder pa
 # Test individual knowledge system components
 python test_components.py
 
-# Test infrastructure (Qdrant connectivity)
-python test_infrastructure.py
+# Test infrastructure (Pinecone connectivity)
+python test_pinecone.py
 
 # Test embedding configuration
 python test_voyage_config.py
@@ -100,7 +97,9 @@ Required environment variables:
 - `ANTHROPIC_API_KEY`: Anthropic API key
 - `GOOGLE_API_KEY`: Google Gemini API key
 - `VOYAGE_API_KEY`: Voyage AI embeddings (recommended)
+- `PINECONE_API_KEY`: Pinecone vector database API key
 - `DEFAULT_MODEL`: Default LLM model (e.g., "gemini/gemini-pro")
+- `MEM0_API_KEY`: Mem0 API key for enhanced agent memory (optional)
 
 ### Model Configuration
 
@@ -114,7 +113,7 @@ The service uses LiteLLM for model abstraction. Default model is configured in `
 
 - `app/agents/`: Agent implementations for different domains
 - `app/api/`: FastAPI router definitions
-- `app/core/`: Core configuration and utilities (config, embeddings, Qdrant)
+- `app/core/`: Core configuration and utilities (config, embeddings, Pinecone)
 - `app/knowledge/`: Knowledge management system
 - `documents/`: Medical/fitness knowledge documents for RAG
 - `scripts/`: CLI tools for document embedding and management
@@ -127,17 +126,59 @@ The service uses LiteLLM for model abstraction. Default model is configured in `
 3. **API Endpoints**: Add new routes in `app/api/` and include in main FastAPI app
 4. **Testing**: Use component tests and interactive chat for validation
 
+## Pain Assessment AI Enhancement Requirements
+
+The pain assessment workflow is being enhanced to be fully AI-driven with the following specifications:
+
+###  Target State
+
+
+**Target**: Fully AI-based pain assessment that:
+- Uses RAG system to fetch relevant medical knowledge based on user queries
+- Leverages Mem0 long-term memory for personalized, tailored questioning
+- Dynamically generates questions based on AI analysis rather than hardcoded templates
+- Outputs structured pain_summary in JSON format at workflow completion
+- Use the virtual-coach/chat endpoint WITHOUT REMOVING THE OLD ENDPOINT, BUT WE WANT THIS ENDPOINT TO ALWAYS BE WORKING WITH STREAMIGN + TOOL CALLS 
+- EVERYTIME WE TEST WE ONLY WANT TO HIT THE VIRTUAL-COACH ENDPOINT this is the one that will go into production
+
+### Key Changes Required
+
+1. **Enhanced RAG Integration**: Improve knowledge retrieval to inform question generation
+2. **Mem0 Memory Integration**: Use persistent memory to ask context-aware, personalized questions
+3. **Dynamic Question Generation**: AI determines necessary questions based on patient context and medical knowledge
+4. **Structured Output**: Generate comprehensive pain_summary JSON at assessment completion
+
+### Implementation Goals
+
+- Pain agent should intelligently determine what questions to ask based on:
+  - Initial user pain description
+  - Retrieved medical knowledge from RAG system
+  - Historical patient data from Mem0 memory
+  - Clinical assessment best practices embedded in knowledge base
+- Assessment should feel natural and conversational while maintaining clinical rigor
+- Final output should provide structured, actionable pain assessment summary
+
 ## Important Notes
 
-- The service requires Qdrant to be running for vector storage operations
+- The service uses Pinecone cloud-hosted vector database for knowledge storage
 - Knowledge documents should be structured with proper headings (H1, H2, H3) for optimal RAG performance
 - Agent system uses LlamaIndex's FunctionAgent and AgentWorkflow for orchestration
-- Chat memory is stored in `app/chat_memory/` as JSON files per user
-- Collection naming follows pattern: `gogain_{knowledge_type}_{body_region}`
+- Chat memory is currently stored as JSON files per user, with plans to migrate to Mem0 for enhanced AI agent memory capabilities
+- Index naming follows pattern: `gogain-{knowledge_type}-{body_region}`
+
+## Critical Development Rules
+
+**NEVER USE KEYWORD-BASED MATCHING IN THIS CODEBASE**
+- Do not implement keyword detection (e.g., `if "pain" in query.lower()`)
+- Do not use hardcoded string matching for routing or logic decisions
+- All routing and decision-making must be AI-driven through the agent system
+- Use semantic understanding via embeddings and LLM reasoning instead of keywords
+- This ensures the system remains intelligent, context-aware, and maintainable
 
 ## Troubleshooting
 
-- **Qdrant Connection Issues**: Ensure Qdrant is running on port 6333
-- **Embedding Errors**: Check API keys and network connectivity
+- **Pinecone Connection Issues**: Check PINECONE_API_KEY and network connectivity
+- **Embedding Errors**: Verify API keys (Voyage AI/OpenAI) and network connectivity
 - **Agent Failures**: Verify LLM model availability and API quotas
-- **Knowledge Retrieval**: Use `scripts/embed_documents.py list` to verify knowledge bases exist
+- **Knowledge Retrieval**: Use `scripts/embed_documents.py list` to verify Pinecone indexes exist
+
