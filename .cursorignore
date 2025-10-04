@@ -1,7 +1,0 @@
-# example: ignore all virtual-env and site-packages
-venv/
-**/site-packages/
-# ignore generated client code
-client_gen/**
-# keep the app folder even if a wider ignore would exclude it
-!app/**
