@@ -11,7 +11,6 @@ from llama_index.core.settings import Settings
 from llama_index.llms.openai import OpenAI
 
 from app.agents.central import build_workflow
-from app.agents import build_all
 from app.core.memory import get_mem0_client
 from app.core.config import DEFAULT_MODEL
 from app.tools.date_tool import current_datetime_context_line
@@ -36,6 +35,16 @@ from app.core.cache import (
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Global agent cache (initialized at startup, reused for all users)
+# Agents are stateless - user context comes from messages array per-request
+_CACHED_AGENTS = {
+    "pain": None,
+    "training": None,
+    "qa": None,
+}
+_AGENT_CACHE_LOCK = asyncio.Lock()
 
 
 # Per-request workflows only; remove shared global caches to avoid cross-user leakage
@@ -182,10 +191,62 @@ async def build_pain_agent_context(user_id: str, current_message: str, user_memo
     return messages
 
 
+async def warmup_agents(llm):
+    """Build and cache essential agents at startup (Pain, Training, QA only).
+
+    This eliminates the 20-second first-request delay by pre-building agents.
+    Safe for multi-user: agents are stateless, user context comes from messages.
+    """
+    async with _AGENT_CACHE_LOCK:
+        logger.info("🔥 Building essential agents for cache...")
+
+        # Import agent builders
+        from app.agents.pain import build as build_pain
+        from app.agents.training import build as build_training
+        from app.agents.qa import build as build_qa
+
+        # Build only the 3 essential agents
+        _CACHED_AGENTS["pain"] = build_pain(llm)
+        _CACHED_AGENTS["training"] = build_training(llm)
+        _CACHED_AGENTS["qa"] = build_qa(llm)
+
+        logger.info("✅ Cached 3 essential agents (Pain, Training, QA)")
+
+
+def get_cached_or_build_agents(llm):
+    """Return cached agents if available, otherwise build them.
+
+    Returns list of agents in order: [Pain, Training, QA]
+    """
+    if all(_CACHED_AGENTS.values()):
+        logger.info("⚡ Using cached agents (fast path)")
+        return [
+            _CACHED_AGENTS["pain"],
+            _CACHED_AGENTS["training"],
+            _CACHED_AGENTS["qa"],
+        ]
+    else:
+        # Fallback: build if cache not ready (shouldn't happen after warmup)
+        logger.warning("⚠️ Agent cache not ready, building on-demand (slow path)")
+        from app.agents.pain import build as build_pain
+        from app.agents.training import build as build_training
+        from app.agents.qa import build as build_qa
+
+        return [
+            build_pain(llm),
+            build_training(llm),
+            build_qa(llm),
+        ]
+
+
 def get_or_build_workflow(llm):
-    """Return a fresh workflow instance per request to avoid cross-user state leakage."""
-    logger.info("🏗️ Building per-request workflow instance")
-    specialist_agents = build_all(llm)
+    """Return a fresh workflow instance per request using cached agents.
+
+    Workflow wrapper is lightweight (just orchestration), built per-request.
+    Agents are reused from cache (safe: stateless, context via messages).
+    """
+    logger.info("🏗️ Building workflow with cached agents")
+    specialist_agents = get_cached_or_build_agents(llm)
     workflow = build_workflow(
         llm,
         specialist_agents,
@@ -255,13 +316,13 @@ async def handle_chat(request: ChatRequest) -> StreamingResponse:
             else:
                 yield emit_event(create_status_event("Starting new conversation"))
 
-            # Build contextual messages for router (10 messages) and agents (40 messages)
-            # Router gets extended context to maintain awareness of ongoing assessments
+            # Build contextual messages for router (3 messages) and agents (40 messages)
+            # Router needs minimal context - just enough to detect ongoing flows
             routing_messages = build_message_array_context(
-                history=history[-9:] if len(history) > 9 else history,  # Last 9 + current = 10 total
+                history=history[-2:] if len(history) > 2 else history,  # Last 2 + current = 3 total
                 current_message=request.message,
                 user_memories=user_memories,
-                limit=10,  # 10 messages for router context
+                limit=3,  # 3 messages for router context (optimized for speed)
                 include_memories=False  # Memories disabled for performance
             )
 
@@ -548,12 +609,12 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
 
             prior_history = to_history_pairs(history)
 
-            # CRITICAL: Build router context from FULL history (router needs full context to make routing decisions)
+            # Build router context with minimal history for fast routing decisions
             routing_messages = build_message_array_context(
-                history=prior_history[-9:] if len(prior_history) > 9 else prior_history,
+                history=prior_history[-2:] if len(prior_history) > 2 else prior_history,
                 current_message=user_message,
                 user_memories=[],
-                limit=10,
+                limit=3,  # Router only needs recent context (optimized for speed)
                 include_memories=False,
             )
             routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
@@ -622,6 +683,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         user_msg=user_message,
                         router_context=routing_messages,
                         agent_context=agent_messages,
+                        user_id=user_id,
                     ):
                         token = coerce_chunk_to_text(response_chunk)
                         if not token:
@@ -651,12 +713,14 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         user_msg=user_message,
                         router_context=routing_messages,
                         agent_context=agent_messages,
+                        user_id=user_id,
                     )
                 elif hasattr(workflow, 'arun'):
                     result = await workflow.arun(
                         user_msg=user_message,
                         router_context=routing_messages,
                         agent_context=agent_messages,
+                        user_id=user_id,
                     )
                 else:
                     result = ""
@@ -739,7 +803,7 @@ router.add_api_route(
 )
 
 
-__all__ = ["router", "legacy_router", "get_or_build_workflow"]
+__all__ = ["router", "legacy_router", "get_or_build_workflow", "warmup_agents"]
 
 # user memories 
 @router.get("/memories/{user_id}")
