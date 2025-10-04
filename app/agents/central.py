@@ -6,7 +6,6 @@ import logging
 import asyncio
 from typing import List, Any, Dict
 import os
-from openai import OpenAI
 
 from llama_index.core.agent.workflow import AgentWorkflow, FunctionAgent
 from llama_index.core.base.llms.base import BaseLLM
@@ -27,6 +26,9 @@ Tu es l'Agent Routeur Central pour GoGain AI Coach.
 
 Ta mission est de décider quel spécialiste doit traiter le message de l'utilisateur.
 Tu ne dois JAMAIS répondre directement à la place d'un spécialiste.
+
+SALUTATIONS :
+- Toute salutation ("salut", "hey", "bonjour", "hello", "hi") → handoff_GeneralQAAgent
 
 PRIORITÉ AU CONTEXTE EN COURS (CRITIQUE) :
 - Tu peux et DOIS analyser tout l'historique de discussion pour deviner le flux en cours.
@@ -50,7 +52,8 @@ Utilise immédiatement l'outil de handoff adapté :
 - Toute mention de douleur OU toute réponse de suivi douleur → handoff_EnhancedPainAssessmentAgent
 - Création d'un plan d'entraînement uniquement → handoff_PersonalTrainingAgent
 - Création d'un plan alimentaire uniquement → handoff_NutritionAgent
-- Questions générales de santé/fitness → handoff_GeneralQAAgent
+- Questions générales de santé/fitness NON liées à une douleur → handoff_GeneralQAAgent
+- Si tu ne sais pas quel agent choisir ET que ce n'est pas lié à une douleur → handoff_GeneralQAAgent
 
 RÈGLES DE ROUTAGE (INTERPRÈTE LE MESSAGE ACTUEL DANS SON CONTEXTE) :
 - Agent douleur : dès que le message mentionne une douleur/blessure/gêne OU répond à une question de l'agent douleur (cf. exemples ci-dessus) → envoie à l'agent douleur.
@@ -463,12 +466,14 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                         # If anything goes wrong, fall back to safe chunked streaming.
                         streamed = False
                         try:
+                            from openai import AsyncOpenAI
+
                             current_agent_config = self.agents[self._current_agent]
                             agent_instance = current_agent_config
 
                             if final_text:
                                 logger.info("🌊 Streaming final pain-agent response via OpenAI native streaming")
-                                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                                async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
                                 model_name = getattr(getattr(agent_instance, "llm", None), "model", "gpt-4o-mini")
                                 openai_messages = [
                                     {
@@ -480,12 +485,14 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                     },
                                     {"role": "user", "content": final_text},
                                 ]
+
                                 try:
-                                    for event in client.chat.completions.create(
+                                    stream = await async_client.chat.completions.create(
                                         model=model_name,
                                         messages=openai_messages,
                                         stream=True,
-                                    ):
+                                    )
+                                    async for event in stream:
                                         try:
                                             delta = event.choices[0].delta
                                             chunk = getattr(delta, "content", None) or ""
@@ -553,6 +560,8 @@ class EnhancedAgentWorkflow(AgentWorkflow):
 
                         logger.info(f"🌊 Using OpenAI native streaming for {self._current_agent}")
                         try:
+                            from openai import AsyncOpenAI
+
                             # Convert message array to OpenAI format
                             openai_messages: list[dict] = []
                             for m in (messages_for_stream or [{"role": "user", "content": user_msg}]):
@@ -564,13 +573,22 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                         "content": m.get("content", ""),
                                     })
 
-                            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                            # CRITICAL: Extract and prepend agent's system prompt
+                            agent_system_prompt = getattr(agent_instance, 'system_prompt', None)
+                            if agent_system_prompt:
+                                openai_messages.insert(0, {"role": "system", "content": agent_system_prompt})
+                                logger.info(f"✅ Injected system prompt for {self._current_agent}")
+                            else:
+                                logger.warning(f"⚠️ No system prompt found for {self._current_agent}")
+
+                            async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
                             model_name = getattr(getattr(agent_instance, "llm", None), "model", "gpt-4o-mini")
-                            for event in client.chat.completions.create(
+                            stream = await async_client.chat.completions.create(
                                 model=model_name,
                                 messages=openai_messages,
                                 stream=True,
-                            ):
+                            )
+                            async for event in stream:
                                 try:
                                     delta = event.choices[0].delta
                                     chunk = getattr(delta, "content", None) or ""
@@ -612,8 +630,15 @@ class EnhancedAgentWorkflow(AgentWorkflow):
 def build_workflow(
     llm: BaseLLM, specialist_agents: List[Any], initial_state: dict | None = None
 ) -> EnhancedAgentWorkflow:
-    """Build AgentWorkflow with CentralRouterAgent as root and specialists."""
-    central_router = build_router(llm)
+    """Build AgentWorkflow with CentralRouterAgent as root and specialists.
+
+    Uses a faster/cheaper model for routing decisions to minimize latency.
+    """
+    # Use fast, cheap model for router (routing is simple decision-making)
+    from llama_index.llms.openai import OpenAI
+    router_llm = OpenAI(model="gpt-4o-mini", temperature=0.3)
+
+    central_router = build_router(router_llm)
     all_agents = [central_router] + list(specialist_agents)
 
     workflow = EnhancedAgentWorkflow(
@@ -622,5 +647,5 @@ def build_workflow(
         initial_state=initial_state or {},
     )
 
-    logger.info("🤖 Workflow initialized with CentralRouterAgent and specialists")
+    logger.info("🤖 Workflow initialized with fast router (gpt-4o-mini) and specialists")
     return workflow

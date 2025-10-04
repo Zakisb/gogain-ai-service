@@ -1362,6 +1362,7 @@ def create_pain_summary_generator_tool() -> FunctionTool:
         # Get user_id programmatically from context variable (set by API layer)
         # Safe for concurrent async requests - each request has isolated context
         user_id = _user_id_context.get()
+        safe_user_id = re.sub(r"[^A-Za-z0-9._-]", "_", user_id or "unknown_user")
 
         print(f"🔥 OPENAI AGENT TOOL: generate_adaptive_pain_summary called")
         logger.warning(f"🔥 OPENAI AGENT TOOL: generate_adaptive_pain_summary called for {body_region}, user: {user_id}")
@@ -1409,7 +1410,13 @@ def create_pain_summary_generator_tool() -> FunctionTool:
             os.makedirs(log_dir, exist_ok=True)
 
             # Generate filename with timestamp and user_id
-            filename = f"pain_summary_{user_id}_{body_region.replace(' ', '_')}_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
+            filename = (
+                "pain_summary_"
+                f"{safe_user_id}_"
+                f"{body_region.replace(' ', '_').replace('/', '_')}_"
+                f"{timestamp.strftime('%Y%m%d_%H%M%S')}"
+                ".json"
+            )
             log_path = os.path.join(log_dir, filename)
 
             # Write raw JSON to file

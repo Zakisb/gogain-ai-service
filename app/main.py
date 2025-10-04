@@ -9,7 +9,7 @@ from app.core import config
 from app.api.chat import (
     router as chat_router,
     legacy_router as vc_legacy_router,
-    get_or_build_workflow,
+    warmup_agents,
 )
 from llama_index.core.settings import Settings
 from llama_index.llms.openai import OpenAI
@@ -27,14 +27,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Redis connection failed or not configured: {e}")
 
-    # Startup: Warmup - pre-build agents to eliminate first-request delay
-    print("🔥 Warming up agents...")
+    # Startup: Warmup - pre-build and cache essential agents (Pain, Training, QA)
+    print("🔥 Warming up essential agents...")
     from app.core.config import DEFAULT_MODEL
 
     try:
         warmup_llm = OpenAI(model=DEFAULT_MODEL, temperature=0.7)
-        get_or_build_workflow(warmup_llm)
-        print("✅ Agents warmed up successfully")
+        await warmup_agents(warmup_llm)
+        print("✅ Essential agents cached successfully")
     except Exception as e:
         print(f"⚠️ Agent warmup failed (will build on first request): {e}")
 
