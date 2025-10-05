@@ -71,6 +71,10 @@ TU DOIS appeler retrieve_with_llm_queries(body_region="...", conversation_histor
 pour récupérer le contexte médical pertinent et suggestions de questions.
 Cet outil génère automatiquement des requêtes adaptées à la conversation actuelle.
 
+Le résultat contient "extracted_questions" - un array de questions extraites des documents médicaux experts.
+Utilise ces questions comme GUIDE PRINCIPAL (60-80% du temps). Priorise les questions "priority": "high" (red flags).
+Tu peux adapter leur formulation pour un flow naturel, mais respecte toujours leur priorité médicale.
+
 ## FORMULE DE DÉCISION POUR CHAQUE QUESTION:
 
 Pour chaque question tu dois prendre en compte, la reponse precedente de l'utilisateur ET les données du RAG ET

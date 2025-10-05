@@ -1471,6 +1471,44 @@ def initialize_global_assessment_tools():
 def create_llm_driven_rag_tool() -> FunctionTool:
     """Create LLM-driven RAG tool that generates queries dynamically based on conversation context."""
 
+    def _collect_all_questions(consolidated_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Collect all extracted questions with priority and context.
+
+        Args:
+            consolidated_results: List of consolidated RAG results with metadata
+
+        Returns:
+            List of question dicts sorted by priority and relevance
+        """
+        all_questions = []
+
+        for doc in consolidated_results:
+            metadata = doc.get("metadata", {})
+            extracted = metadata.get("extracted_questions", [])
+
+            for q in extracted:
+                q_stripped = q.strip()
+                if q_stripped:  # Skip empty questions
+                    all_questions.append({
+                        "question": q_stripped,
+                        "priority": doc.get("priority", "medium"),
+                        "relevance_score": doc.get("score", 0.0),
+                        "source_context": doc.get("text", "")[:300] + "..."  # First 300 chars of source
+                    })
+
+        # Sort by priority (high first) then by relevance score
+        priority_order = {"critical": 5, "high": 4, "medium": 3, "low": 2, "very_low": 1}
+        all_questions.sort(
+            key=lambda x: (
+                priority_order.get(x["priority"], 0),
+                x["relevance_score"]
+            ),
+            reverse=True
+        )
+
+        # Return top 20 questions to avoid overwhelming the AI
+        return all_questions[:20]
+
     def retrieve_with_llm_queries(
         body_region: str,
         conversation_history: str
@@ -1591,15 +1629,27 @@ Respond ONLY with valid JSON in this exact format:
         # Consolidate results
         consolidated_results = retriever._consolidate_results(all_results)
 
+        # Collect all extracted questions from the results
+        extracted_questions = _collect_all_questions(consolidated_results)
+
         # Format for AI
         formatted_result = {
             "llm_generated_queries": queries[:5],
             "hyde_snippet": hyde_snippet,
+
+            # NEW: Explicit array of extracted questions from medical documents
+            "extracted_questions": extracted_questions,
+
             "medical_knowledge": [
                 {
                     "content": doc["text"],
                     "relevance_score": doc["score"],
-                    "priority": doc["priority"]
+                    "priority": doc["priority"],
+
+                    # NEW: Include question metadata for transparency
+                    "has_questions": doc.get("has_questions", False),
+                    "question_count": doc.get("question_count", 0),
+                    "questions_in_chunk": doc.get("metadata", {}).get("extracted_questions", [])
                 }
                 for doc in consolidated_results[:10]
             ],
@@ -1607,6 +1657,13 @@ Respond ONLY with valid JSON in this exact format:
         }
 
         print(f"✅ LLM-RAG: Retrieved {len(consolidated_results)} chunks using {len(queries)} LLM-generated queries")
+        print(f"🔍 EXTRACTED: {len(extracted_questions)} questions from medical documents")
+
+        # Show top extracted questions in logs
+        if extracted_questions:
+            print(f"📋 TOP EXTRACTED QUESTIONS:")
+            for i, q in enumerate(extracted_questions[:5], 1):
+                print(f"   {i}. [{q['priority']}] {q['question'][:100]}...")
 
         return json.dumps(formatted_result, indent=2)
 
