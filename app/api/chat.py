@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
 import asyncio
+import json
 from typing import List, Dict, Any, Union
 
 from llama_index.core.settings import Settings
@@ -563,9 +564,46 @@ def emit_vc_event(event_type: str, content: Any) -> str:
     Format: data: {"type":"<type>","content":<content>}\n\n
     Using double newline to ensure immediate transmission in Docker.
     """
-    import json
     payload = json.dumps({"type": event_type, "content": content}, ensure_ascii=False)
     return f"data: {payload}\n\n"
+
+
+def unwrap_pain_agent_response(response_text: str) -> str:
+    """Parse pain agent structured JSON response and unwrap conclusions.
+
+    If response_type is "conclusion", extract the plain text from the conclusion field.
+    If response_type is "question", keep the JSON intact for the frontend.
+
+    Args:
+        response_text: The raw response from pain agent (possibly JSON)
+
+    Returns:
+        Either the original JSON (for questions) or unwrapped text (for conclusions)
+    """
+    try:
+        # Try to parse as JSON
+        parsed = json.loads(response_text.strip())
+
+        # Check if it's a structured pain agent response
+        if isinstance(parsed, dict) and "response_type" in parsed:
+            response_type = parsed.get("response_type")
+
+            if response_type == "conclusion":
+                # Unwrap conclusion to plain text
+                conclusion_text = parsed.get("conclusion", "")
+                logger.info(f"🔓 Unwrapped pain agent conclusion ({len(conclusion_text)} chars)")
+                return conclusion_text
+            elif response_type == "question":
+                # Keep question JSON intact - frontend expects this format
+                logger.info(f"❓ Keeping pain agent question in JSON format")
+                return response_text
+
+        # Not a structured response, return as-is
+        return response_text
+
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON, return as-is
+        return response_text
 
 
 @legacy_router.post("/virtual-coach/chat")
@@ -743,6 +781,10 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # DUAL HISTORY SYSTEM: Check which agent handled the request
             handling_agent = workflow.get_current_agent() if hasattr(workflow, 'get_current_agent') else None
             logger.info(f"🎯 Request handled by agent: {handling_agent}")
+
+            # Unwrap pain agent structured JSON responses if needed
+            if handling_agent == "EnhancedPainAssessmentAgent":
+                final_response_content = unwrap_pain_agent_response(final_response_content)
 
             # Store messages based on which agent handled the request
             if handling_agent == "EnhancedPainAssessmentAgent":

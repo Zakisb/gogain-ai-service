@@ -21,6 +21,39 @@ Ton objectif: Investiguer la douleur du patient par des questions intelligentes 
 sa source et cause, puis donner recommandations et conseils pour la résolution et prévention a la fin du
 processus de pain assesment.
 
+**FORMAT DE RÉPONSE OBLIGATOIRE (JSON STRUCTURÉ):**
+
+Tu dois TOUJOURS répondre en JSON avec l'une des deux structures suivantes:
+
+MODE 1 - QUESTION D'ÉVALUATION (pendant l'investigation):
+```json
+{
+  "response_type": "question",
+  "question": "Ta question d'évaluation en français",
+  "type": "single_choice",
+  "options": [
+    {"id": "localisation_centre", "label": "Douleur localisée au centre du bas du dos"},
+    {"id": "localisation_cote", "label": "Douleur d'un côté uniquement"},
+    {"id": "autre", "label": "Autre (précisez)"}
+  ]
+}
+```
+- Toujours inclure option "autre" avec id "autre" pour cas non couverts
+- IDs en snake_case, sans espaces
+- Nombre d'options flexible (minimum 2)
+- "single_choice" = une sélection, "multiple_choice" = plusieurs sélections
+
+MODE 2 - CONCLUSION FINALE (après generate_adaptive_pain_summary):
+```json
+{
+  "response_type": "conclusion",
+  "conclusion": "Voici ton texte de conclusion détaillé avec recommandations, conseils et exercices en français..."
+}
+```
+- Utilise ce format APRÈS avoir appelé generate_adaptive_pain_summary
+- Présente les recommandations, conseils et exercices dans le champ "conclusion"
+- Sois détaillé, empathique et actionnable
+
 **OUTIL DISPONIBLE:**
 - `get_current_date()`: Appelez cet outil chaque fois que vous avez besoin de la date actuelle (format YYYY-MM-DD).
   Utilisez-le pour dater l'évaluation, calculer la durée de la douleur, ou tout contexte temporel.
@@ -154,18 +187,18 @@ def build(llm: BaseLLM) -> FunctionAgent:  # noqa: D401 – simple factory
     # Import here to avoid circular imports
     from app.knowledge.enhanced_assessment_tools import get_enhanced_pain_assessment_tools
     from app.tools.date_tool import get_date_tool
-    from llama_index.llms.openai import OpenAI
+    from app.core.structured_llm import StructuredOpenAI
     import os
 
-    # Use direct OpenAI LLM for proper tool calling
-    openai_llm = OpenAI(
+    # Use StructuredOpenAI to enforce JSON schema for structured responses
+    # Schema supports both question mode and conclusion mode
+    openai_llm = StructuredOpenAI(
         model="gpt-4o",  # Use GPT-4o directly
         temperature=0.5,  # Lower temperature for careful, consistent questioning without repetition
-        max_tokens=600,   # Enough for tool calls (~100 tokens) + single question response (~500 tokens)
+        max_tokens=800,   # Increased for tool calls + JSON response with multiple options
         api_key=os.getenv("OPENAI_API_KEY"),
-        # Direct OpenAI will properly handle tool_choice
     )
-    logger.info("🔥 Using direct OpenAI LLM for pain agent tooling")
+    logger.info("🔥 Using StructuredOpenAI for pain agent with enforced JSON schema")
 
     # Use enhanced RAG tools with Qdrant instead of Pinecone
     # use_llm_rag=True enables the new LLM-driven query generation (adaptive)
