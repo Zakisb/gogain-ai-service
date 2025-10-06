@@ -14,6 +14,7 @@ from app.core.embeddings import configure_global_embedding
 from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance
 import json
 
 def embed_with_enhanced_hierarchical():
@@ -67,22 +68,29 @@ def embed_with_enhanced_hierarchical():
     }
 
     # Create main collection for hierarchical chunks
-    collection_name = "pain_hierarchical_chunks"
+    collection_name = "pain_hierarchical_chunks_v2"
 
     try:
-        # Create collection if it doesn't exist
         qdrant_client.create_collection(
             collection_name=collection_name,
             vectors_config={
-                "size": 1024,  # Voyage AI embedding dimension
-                "distance": "Cosine"
-            }
+                "text-dense": VectorParams(size=1024, distance=Distance.COSINE)
+            },
         )
         print(f"✓ Created collection: {collection_name}")
         total_stats["collections_created"].append(collection_name)
     except Exception as e:
         if "already exists" in str(e).lower():
-            print(f"✓ Collection {collection_name} already exists")
+            print(f"⚠️ Collection {collection_name} already exists – recreating to ensure vector configuration")
+            qdrant_client.delete_collection(collection_name)
+            qdrant_client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    "text-dense": VectorParams(size=1024, distance=Distance.COSINE)
+                },
+            )
+            print(f"✓ Recreated collection: {collection_name}")
+            total_stats["collections_created"].append(collection_name)
         else:
             print(f"❌ Error creating collection: {e}")
             return
@@ -90,7 +98,8 @@ def embed_with_enhanced_hierarchical():
     # Create vector store
     vector_store = QdrantVectorStore(
         client=qdrant_client,
-        collection_name=collection_name
+        collection_name=collection_name,
+        vector_name="text-dense"
     )
 
     # Process each document

@@ -43,6 +43,9 @@ _CACHED_PAIN_QUESTIONS: dict[tuple[str, str], set[str]] = {}
 # Keyed by (context_key, body_region) -> Dict containing knowledge_results and metadata
 _CACHED_RAG_KNOWLEDGE: dict[tuple[str, str], Dict[str, Any]] = {}
 
+PRIMARY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks_v2"
+LEGACY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks"
+
 class AssessmentPhase(Enum):
     """Assessment phases for different retrieval strategies."""
     INITIAL = "initial"
@@ -77,7 +80,12 @@ class EnhancedRAGAssessmentRetriever:
     def _precache_collections(self):
         """Pre-cache available collections with fallback logic."""
         # Try hierarchical first, fallback to any available collection
-        fallback_collections = ["pain_hierarchical_chunks", "questions", "test_questions"]
+        fallback_collections = [
+            PRIMARY_HIERARCHICAL_COLLECTION,
+            LEGACY_HIERARCHICAL_COLLECTION,
+            "questions",
+            "test_questions",
+        ]
 
         for collection in fallback_collections:
             try:
@@ -96,7 +104,7 @@ class EnhancedRAGAssessmentRetriever:
             vector_store = QdrantVectorStore(
                 client=self.qdrant_client,
                 collection_name=collection_name,
-                vector_name=None  # Use default/unnamed vector instead of "text-dense"
+                vector_name="text-dense",
             )
             index = VectorStoreIndex.from_vector_store(vector_store)
             self._indices_cache[collection_name] = index
@@ -758,7 +766,12 @@ class EnhancedRAGAssessmentRetriever:
         """Pure Semantic RAG: Retrieve from hierarchical chunks with AI-driven understanding."""
         try:
             # Try multiple collections with fallback logic
-            collection_candidates = ["pain_hierarchical_chunks", "questions", "test_questions"]
+            collection_candidates = [
+                PRIMARY_HIERARCHICAL_COLLECTION,
+                LEGACY_HIERARCHICAL_COLLECTION,
+                "questions",
+                "test_questions",
+            ]
 
             index = None
             collection_name = None
@@ -791,6 +804,16 @@ class EnhancedRAGAssessmentRetriever:
             filtered_results = self._apply_semantic_filtering(
                 nodes, body_region, search_for_questions, user_symptoms, priority
             )
+
+            # Fallback: if strict region filter yields nothing, relax region constraint
+            if not filtered_results and (body_region or "").strip().lower() != "general":
+                try:
+                    print("⚠️ No candidates after region filter; retrying without region constraint")
+                    filtered_results = self._apply_semantic_filtering(
+                        nodes, "general", search_for_questions, user_symptoms, priority
+                    )
+                except Exception as _e:
+                    print(f"⚠️ Fallback filtering failed: {_e}")
 
             print(f"🧠 SEMANTIC RAG: Filtered {len(filtered_results)} from {len(nodes)} hierarchical nodes")
 
@@ -840,23 +863,44 @@ class EnhancedRAGAssessmentRetriever:
         return enriched
 
     def _normalize_body_region_french(self, body_region: str) -> str:
-        """Normalize French body region input to match Qdrant metadata (all French)."""
-        # All user input is French - map to Qdrant French values
-        french_normalization = {
-            "épaule": "epaule",
-            "épaules": "epaule",
-            "genou": "genou",
-            "genoux": "genou",
-            "dos": "dos",
-            "bas du dos": "dos",  # User says "bas du dos", Qdrant has "dos"
-            "cou": "cou",
-            "hanche": "hanche",
-            "hanches": "hanche",
-            "cheville": "cheville_pied",
-            "pied": "cheville_pied",
-            "cheville_pied": "cheville_pied"
+        """Normalize French body region input to match Qdrant metadata (English keys).
+
+        The embeddings use English region labels set at embed time:
+        back, knee, shoulder, neck, foot_ankle, hip, general.
+        """
+        fr_to_en = {
+            # shoulder
+            "épaule": "shoulder",
+            "epaule": "shoulder",
+            "épaules": "shoulder",
+            "epaules": "shoulder",
+            # knee
+            "genou": "knee",
+            "genoux": "knee",
+            # back
+            "dos": "back",
+            "bas du dos": "back",
+            "lombaires": "back",
+            # neck
+            "cou": "neck",
+            # hip
+            "hanche": "hip",
+            "hanches": "hip",
+            # ankle/foot
+            "cheville": "foot_ankle",
+            "pied": "foot_ankle",
+            "cheville/pied": "foot_ankle",
+            # already English
+            "back": "back",
+            "knee": "knee",
+            "shoulder": "shoulder",
+            "neck": "neck",
+            "hip": "hip",
+            "foot_ankle": "foot_ankle",
+            "general": "general",
         }
-        normalized = french_normalization.get(body_region.lower(), body_region)
+        key = (body_region or "").strip().lower()
+        normalized = fr_to_en.get(key, body_region)
         print(f"🔤 Body region normalization: '{body_region}' → '{normalized}'")
         return normalized
 
@@ -1480,11 +1524,13 @@ def create_llm_driven_rag_tool() -> FunctionTool:
         Returns:
             List of question dicts sorted by priority and relevance
         """
-        all_questions = []
+        all_questions: List[Dict[str, Any]] = []
 
         for doc in consolidated_results:
             metadata = doc.get("metadata", {})
-            extracted = metadata.get("extracted_questions", [])
+            extracted = metadata.get("assessment_questions")
+            if extracted is None:
+                extracted = metadata.get("extracted_questions", [])
 
             for q in extracted:
                 q_stripped = q.strip()
@@ -1508,6 +1554,27 @@ def create_llm_driven_rag_tool() -> FunctionTool:
 
         # Return top 20 questions to avoid overwhelming the AI
         return all_questions[:20]
+
+    def _collect_examples(
+        consolidated_results: List[Dict[str, Any]],
+        metadata_key: str,
+        limit: int = 20,
+    ) -> List[str]:
+        """Collect unique examples (e.g., red flags) from consolidated metadata."""
+
+        examples: List[str] = []
+        seen: set[str] = set()
+        for doc in consolidated_results:
+            metadata = doc.get("metadata", {})
+            for item in metadata.get(metadata_key, []) or []:
+                normalized = item.strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                examples.append(normalized)
+                if len(examples) >= limit:
+                    return examples
+        return examples
 
     def retrieve_with_llm_queries(
         body_region: str,
@@ -1639,6 +1706,8 @@ Respond ONLY with valid JSON in this exact format:
 
             # NEW: Explicit array of extracted questions from medical documents
             "extracted_questions": extracted_questions,
+            "red_flag_examples": _collect_examples(consolidated_results, "red_flag_examples"),
+            "patient_statement_examples": _collect_examples(consolidated_results, "patient_statement_examples"),
 
             "medical_knowledge": [
                 {
@@ -1649,7 +1718,9 @@ Respond ONLY with valid JSON in this exact format:
                     # NEW: Include question metadata for transparency
                     "has_questions": doc.get("has_questions", False),
                     "question_count": doc.get("question_count", 0),
-                    "questions_in_chunk": doc.get("metadata", {}).get("extracted_questions", [])
+                    "questions_in_chunk": doc.get("metadata", {}).get("assessment_questions", []),
+                    "red_flag_examples": doc.get("metadata", {}).get("red_flag_examples", []),
+                    "patient_statement_examples": doc.get("metadata", {}).get("patient_statement_examples", []),
                 }
                 for doc in consolidated_results[:10]
             ],
@@ -1664,6 +1735,14 @@ Respond ONLY with valid JSON in this exact format:
             print(f"📋 TOP EXTRACTED QUESTIONS:")
             for i, q in enumerate(extracted_questions[:5], 1):
                 print(f"   {i}. [{q['priority']}] {q['question'][:100]}...")
+
+            print("📚 ALL EXTRACTED QUESTIONS:")
+            for idx, q in enumerate(extracted_questions, 1):
+                question_preview = q['question'].replace('\n', ' ')[:160]
+                print(
+                    f"   {idx}. priority={q['priority']} score={q['relevance_score']:.4f} "
+                    f"question={question_preview}"
+                )
 
         return json.dumps(formatted_result, indent=2)
 
