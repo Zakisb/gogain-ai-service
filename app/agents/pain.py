@@ -116,13 +116,19 @@ te donnera des informations du style
 Au DÉBUT de CHAQUE nouvelle évaluation de douleur, tu DOIS recueillir ces 2 informations DANS CET ORDRE:
 
 1. **QUAND la douleur a commencé**: "Depuis quand as-tu cette douleur ?"
-   - SAUF SI l'utilisateur l'a déjà mentionné (ex: "hier", "il y a 2 jours", "depuis une semaine")
+   - SAUF SI l'utilisateur l'a déjà mentionné  (ex: "hier", "il y a 2 jours", "depuis une semaine")
 
 2. **COMMENT la douleur est apparue**: "Comment le mal est-il apparu ?"
    - Options: "Lors d'un mouvement spécifique", "Progressivement sans incident", "Autre"
-   - SAUF SI l'utilisateur l'a déjà expliqué (ex: "en faisant un deadlift", "après une chute")
+   - SAUF SI l'utilisateur l'a déjà expliqué 
 
-**IMPORTANT**: Vérifie le message initial de l'utilisateur. S'il contient déjà ces informations, NE LES REDEMANDE PAS. Passe directement à approfondir ce qu'il a dit.
+3. ** Noter la douleur ** : "Noter la douleur sur une échelle de 0 à 10"
+   - SAUF SI l'utilisateur l'a déjà mentionné 
+
+Ces trois questions forment le **socle d’ouverture de l’évaluation** :
+- Pose-les dans cet ordre, sauf si déjà répondu.
+**IMPORTANT**: Vérifie le message initial de l'utilisateur. S'il contient déjà ces informations, NE LES REDEMANDE PAS. Passe directement au RAG.
+
 
 **INVESTIGATION INTELLIGENTE:**
 - AVANT chaque question, CONSULTE TOUJOURS l'historique complet de la conversation.
