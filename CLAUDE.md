@@ -134,11 +134,12 @@ The pain assessment workflow is being enhanced to be fully AI-driven with the fo
 
 
 **Target**: Fully AI-based pain assessment that:
-- Uses RAG system to fetch relevant medical knowledge based on user queries
+- Uses RAG system to fetch relevant medical knowledge AND pain assessment questions  based on user queries
 - Leverages Mem0 long-term memory for personalized, tailored questioning
-- Dynamically generates questions based on AI analysis rather than hardcoded templates
+- Dynamically generates questions based on AI analysis AND retrieved data from the RAG
 - Outputs structured pain_summary in JSON format at workflow completion
-- Use the virtual-coach/chat endpoint WITHOUT REMOVING THE OLD ENDPOINT, BUT WE WANT THIS ENDPOINT TO ALWAYS BE WORKING WITH STREAMIGN + TOOL CALLS 
+- Use the virtual-coach/chat endpoint WITHOUT REMOVING THE OLD ENDPOINT, BUT WE WANT THIS ENDPOINT TO ALWAYS BE WORKING WITH STREAMIGN + TOOL CALLS , do not edit the old endpoint since we dont need it 
+- We want the pain agent to always respond in a json format like shown in the prompt, so that it always lists a question, along with a list of options to answer that question, in the event where we cannot put those questions into any categories theere should always be an option called "autre" so that the user can answer by text if their specific case does not exist in the list of options listed into the AI, so the pain agent workflow stays the same, but the output format changes, its no longer asking questions to the user in any format, its asking questions to the user with a list of possible answers to make the user experience better.
 - EVERYTIME WE TEST WE ONLY WANT TO HIT THE VIRTUAL-COACH ENDPOINT this is the one that will go into production
 
 ### Key Changes Required
@@ -146,7 +147,7 @@ The pain assessment workflow is being enhanced to be fully AI-driven with the fo
 1. **Enhanced RAG Integration**: Improve knowledge retrieval to inform question generation
 2. **Mem0 Memory Integration**: Use persistent memory to ask context-aware, personalized questions
 3. **Dynamic Question Generation**: AI determines necessary questions based on patient context and medical knowledge
-4. **Structured Output**: Generate comprehensive pain_summary JSON at assessment completion
+4. **Fast Workflow**: We want no delay, we use gpt4o-mini for everything, the RAG should never run while the user is waitign it should always run while the user is chatting with the chatbot and the chatbot has quesitons to ask in its queue, the user SHOULD NEVER have to wait for the chatbot to retrieve data from qdrant to ask questions, lets say we fetch 10  questions from the rag, the ai decides to ask 4 , when the chatbot arrives to the 3rd question, the agent should launch the rag queries with newly gathered data, it should never wait till the queue is empty to start the RAG
 
 ### Implementation Goals
 
@@ -156,14 +157,14 @@ The pain assessment workflow is being enhanced to be fully AI-driven with the fo
   - Historical patient data from Mem0 memory
   - Clinical assessment best practices embedded in knowledge base
 - Assessment should feel natural and conversational while maintaining clinical rigor
+- We also want to make sure to have NO delay, the user experience needs to be good, so the user never has to wait longer than 4s for a response
 - Final output should provide structured, actionable pain assessment summary
 
 ## Important Notes
 
-- The service uses Pinecone cloud-hosted vector database for knowledge storage
+- The service uses Qdrant  self-hosted vector database for knowledge storage
 - Knowledge documents should be structured with proper headings (H1, H2, H3) for optimal RAG performance
 - Agent system uses LlamaIndex's FunctionAgent and AgentWorkflow for orchestration
-- Chat memory is currently stored as JSON files per user, with plans to migrate to Mem0 for enhanced AI agent memory capabilities
 - Index naming follows pattern: `gogain-{knowledge_type}-{body_region}`
 
 ## Critical Development Rules
@@ -177,8 +178,8 @@ The pain assessment workflow is being enhanced to be fully AI-driven with the fo
 
 ## Troubleshooting
 
-- **Pinecone Connection Issues**: Check PINECONE_API_KEY and network connectivity
+- **Qdrant Connection Issues**: Check QDRANT_API_KEY and connectivity
 - **Embedding Errors**: Verify API keys (Voyage AI/OpenAI) and network connectivity
 - **Agent Failures**: Verify LLM model availability and API quotas
-- **Knowledge Retrieval**: Use `scripts/embed_documents.py list` to verify Pinecone indexes exist
+- **Knowledge Retrieval**: Use `python3 analyze_qdrant.py` to verify qdrant  indexes exist
 

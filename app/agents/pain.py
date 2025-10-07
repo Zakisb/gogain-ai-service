@@ -92,6 +92,7 @@ PROCESSUS OBLIGATOIRE:
 5. Tu dois TOUJOURS CONSTRUIRE TES QUESTIONS SELON LES RÉPONSES DE L'UTILISATEUR ET LES DONNÉES DU RAG
 6. Reformule chaque suggestion du RAG pour coller exactement au vécu de l'utilisateur. N'énumère que des exemples crédibles dans son contexte (ex : si la cause rapportée est un accident, ne cite pas « déménagement » ou d'autres scénarios de charge).
 7. Si aucune question proposée n'est pertinente, adapte-en une en changeant les exemples ou choisis-en une autre plus utile (mais toujours inspirée du RAG et du contexte patient).
+8. **PRIORITÉ TECHNIQUE: Si l'utilisateur mentionne un exercice spécifique (soulevé de terre, squat, deadlift, etc.), tu DOIS prioritairement poser des questions sur la technique, la charge, ou l'encadrement AVANT de passer aux questions générales d'intensité de douleur.**
 
 Exemples (formulations exactes viennent de RAG):
 BON - Utilise RAG contextuel:
@@ -111,9 +112,17 @@ te donnera des informations du style
 
 ## Comportement principal:
 
-**RÈGLE ABSOLUE - PREMIÈRE QUESTION:**
-- Ta TOUTE PREMIÈRE question doit TOUJOURS être: "Depuis quand as-tu cette douleur ?" ou équivalent (quand/depuis combien de temps a commencé la douleur).
-- Cette question est OBLIGATOIRE au début de chaque nouvelle évaluation.
+**RÈGLE ABSOLUE - PREMIÈRES QUESTIONS (NON NÉGOCIABLE):**
+Au DÉBUT de CHAQUE nouvelle évaluation de douleur, tu DOIS recueillir ces 2 informations DANS CET ORDRE:
+
+1. **QUAND la douleur a commencé**: "Depuis quand as-tu cette douleur ?"
+   - SAUF SI l'utilisateur l'a déjà mentionné (ex: "hier", "il y a 2 jours", "depuis une semaine")
+
+2. **COMMENT la douleur est apparue**: "Comment le mal est-il apparu ?"
+   - Options: "Lors d'un mouvement spécifique", "Progressivement sans incident", "Autre"
+   - SAUF SI l'utilisateur l'a déjà expliqué (ex: "en faisant un deadlift", "après une chute")
+
+**IMPORTANT**: Vérifie le message initial de l'utilisateur. S'il contient déjà ces informations, NE LES REDEMANDE PAS. Passe directement à approfondir ce qu'il a dit.
 
 **INVESTIGATION INTELLIGENTE:**
 - AVANT chaque question, CONSULTE TOUJOURS l'historique complet de la conversation.
@@ -232,27 +241,21 @@ def build(llm: BaseLLM) -> FunctionAgent:  # noqa: D401 – simple factory
 
     # Import here to avoid circular imports
     from app.knowledge.enhanced_assessment_tools import get_enhanced_pain_assessment_tools
-    from app.tools.date_tool import get_date_tool
     from app.core.structured_llm import StructuredOpenAI
     import os
 
     # Use StructuredOpenAI to enforce JSON schema for structured responses
     # Schema supports both question mode and conclusion mode
     openai_llm = StructuredOpenAI(
-        model="gpt-4o",  # Use GPT-4o directly
+        model="gpt-4o-mini",  # Use GPT-4o directly
         temperature=0.5,  # Lower temperature for careful, consistent questioning without repetition
         max_tokens=800,   # Increased for tool calls + JSON response with multiple options
         api_key=os.getenv("OPENAI_API_KEY"),
     )
     logger.info("🔥 Using StructuredOpenAI for pain agent with enforced JSON schema")
 
-    # Use enhanced RAG tools with Qdrant instead of Pinecone
-    # use_llm_rag=True enables the new LLM-driven query generation (adaptive)
-    # use_llm_rag=False uses the old static query templates (legacy)
-    all_tools = get_enhanced_pain_assessment_tools(use_llm_rag=True)  # NEW: LLM-driven RAG
-
-    # Add date tool to pain agent
-    all_tools.append(get_date_tool())
+    # Use enhanced RAG tools with Qdrant and LLM-driven query generation
+    all_tools = get_enhanced_pain_assessment_tools()
 
     logger.info("🏗️ Building EnhancedPainAssessmentAgent with %d enhanced tools", len(all_tools))
     print(f"🔧 DEBUG: Pain agent system prompt (first 200 chars): {_SYSTEM_PROMPT[:200]}")

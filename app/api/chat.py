@@ -789,6 +789,12 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # Store messages based on which agent handled the request
             if handling_agent == "EnhancedPainAssessmentAgent":
                 logger.info(f"🔴 Pain agent handled request - storing in pain session for {user_id}")
+
+                # START pain session if not already active (first pain agent interaction)
+                if not await is_pain_agent_session_active(user_id):
+                    logger.info(f"🔴 Starting new pain session for {user_id}")
+                    await start_pain_agent_session(user_id)
+
                 # ALWAYS add both user message and assistant response to the pain session storage
                 # (the user message was used in context building but not yet persisted to session)
                 await add_to_pain_agent_session(user_id, user_message, "user")

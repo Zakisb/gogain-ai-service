@@ -448,8 +448,12 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                     chat_msg = ChatMessage(role=msg.get("role", "user"), content=msg.get("content", ""))
                                     memory.put(chat_msg)
                                 result = await super().run(user_msg=user_msg, memory=memory, **tool_choice_param, **kwargs)
-                            except Exception:
+                            except asyncio.CancelledError:
+                                logger.warning("⚠️ Pain agent execution cancelled by client disconnect")
+                                raise  # Re-raise to properly handle cancellation
+                            except Exception as e:
                                 # Fallback if memory construction fails
+                                logger.warning(f"⚠️ Memory construction failed: {e}, falling back to basic execution")
                                 result = await super().run(user_msg=user_msg, **tool_choice_param, **kwargs)
                         else:
                             result = await super().run(user_msg=user_msg, **tool_choice_param, **kwargs)
@@ -501,6 +505,9 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                         if chunk:
                                             yield chunk
                                     streamed = True
+                                except asyncio.CancelledError:
+                                    logger.warning("⚠️ Streaming cancelled by client disconnect")
+                                    raise  # Re-raise to properly handle cancellation
                                 except Exception as stream_err:
                                     logger.warning(
                                         f"⚠️ Final-response OpenAI streaming failed: {stream_err}"
