@@ -1,10 +1,9 @@
 """Enhanced AI-powered assessment tools with memory integration and clinical reasoning."""
 
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 import logging
 import json
 import re
-import asyncio
 import concurrent.futures
 import contextvars
 from enum import Enum
@@ -45,14 +44,6 @@ _CACHED_RAG_KNOWLEDGE: dict[tuple[str, str], Dict[str, Any]] = {}
 
 PRIMARY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks_v2"
 LEGACY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks"
-
-class AssessmentPhase(Enum):
-    """Assessment phases for different retrieval strategies."""
-    INITIAL = "initial"
-    DETAILED = "detailed"  
-    DIFFERENTIAL = "differential"
-    SUMMARY = "summary"
-
 
 class ClinicalPriority(Enum):
     """Clinical priority levels for knowledge retrieval."""
@@ -157,105 +148,6 @@ class EnhancedRAGAssessmentRetriever:
 
 
 
-    def retrieve_contextual_knowledge(self,
-                                    query: str,
-                                    body_region: str,
-                                    assessment_phase: AssessmentPhase = AssessmentPhase.INITIAL,
-                                    previous_responses: Optional[List[str]] = None,
-                                    top_k: int = 5,
-                                    memory_context: Optional[Dict[str, Any]] = None,
-                                    context_key: Optional[str] = None) -> Dict[str, Any]:
-        """Retrieve knowledge with clinical reasoning and optional caller-provided memory context.
-
-        Notes:
-        - This function is user-identity agnostic. It never reads or infers a user_id.
-        - Callers may pass an opaque `context_key` (e.g., a user/session id) if they want
-          per-user caching behavior. If omitted, caching by user is skipped.
-        - Callers may also pass a pre-fetched `memory_context`. If omitted, an empty
-          memory context is used.
-        """
-        print(f"\n{'='*80}")
-        print(f"⚡ OPTIMIZED RAG: Starting {assessment_phase.value.upper()} phase retrieval")
-        print(f"   Body Region: {body_region}")
-        print(f"   Query: {query[:100]}...")
-        print(f"   Previous Responses: {len(previous_responses) if previous_responses else 0}")
-        print(f"{'='*80}\n")
-
-        try:
-            # Use provided memory context or fallback to empty structure
-            if memory_context is None:
-                memory_context = {k: [] for k in [
-                    "previous_episodes", "treatments_tried", "medications",
-                    "triggers", "improvements", "red_flags_history"
-                ]}
-            
-            # Simple analysis structure - no complex clinical reasoning
-            clinical_analysis = {
-                "user_responses": " ".join(previous_responses) if previous_responses else "",
-                "body_region": body_region,
-                "priority_level": ClinicalPriority.MEDIUM
-            } if previous_responses else {}
-            
-            # Build dynamic queries based on assessment phase and context
-            queries = self._build_dynamic_queries(
-                query, body_region, assessment_phase, clinical_analysis, memory_context
-            )
-            
-            # Retrieve knowledge for each query with user context - PARALLELIZED
-            all_results = []
-            user_symptoms = " ".join(previous_responses) if previous_responses else ""
-
-            # Execute all queries in parallel for 2-3x speed improvement
-            all_results = self._retrieve_queries_parallel(
-                queries, body_region, top_k, user_symptoms, query
-            )
-            
-            # Consolidate and rank results
-            consolidated_results = self._consolidate_results(all_results)
-
-            # Extract any explicit questions from consolidated text chunks for caching
-            try:
-                extracted_questions: list[str] = []
-                for item in consolidated_results:
-                    text = item.get("text", "") or ""
-                    if text:
-                        extracted_questions.extend(self._extract_questions_from_text(text))
-
-                # Cache by (context_key, body_region) only if a context_key is provided
-                if context_key is not None:
-                    cache_key = (str(context_key), str(body_region))
-                    if cache_key not in _CACHED_PAIN_QUESTIONS:
-                        _CACHED_PAIN_QUESTIONS[cache_key] = set()
-                    for q in extracted_questions:
-                        _CACHED_PAIN_QUESTIONS[cache_key].add(q)
-                    print(
-                        f"🗂️ CACHE: Stored {len(extracted_questions)} questions (total {len(_CACHED_PAIN_QUESTIONS[cache_key])}) "
-                        f"for {cache_key}"
-                    )
-                else:
-                    print("🗂️ CACHE: Skipped per-user caching (no context_key provided)")
-            except Exception as e:
-                logger.warning(f"Failed to cache extracted questions: {e}")
-            
-            return {
-                "knowledge_results": consolidated_results,
-                "memory_context": memory_context,
-                "clinical_analysis": clinical_analysis,
-                "assessment_phase": assessment_phase.value,
-                "recommendations": self._generate_knowledge_recommendations(
-                    assessment_phase
-                )
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in contextual knowledge retrieval: {e}")
-            return {
-                "knowledge_results": [],
-                "memory_context": {},
-                "clinical_analysis": {},
-                "error": str(e)
-            }
-
     def _retrieve_queries_parallel(self,
                                   queries: List[Dict[str, Any]],
                                   body_region: str,
@@ -297,103 +189,6 @@ class EnhancedRAGAssessmentRetriever:
 
         print(f"⚡ PARALLEL RAG: Completed all {len(queries)} queries, total results: {len(all_results)}")
         return all_results
-
-    def _build_dynamic_queries(self,
-                             base_query: str,
-                             body_region: str,
-                             phase: AssessmentPhase,
-                             clinical_analysis: Dict[str, Any],
-                             memory_context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Build dynamic queries based on assessment context."""
-        print(f"🔍 QUERY BUILDER: Phase={phase.value.upper()}, body_region={body_region}")
-        queries = []
-
-        if phase == AssessmentPhase.INITIAL:
-            # Initial assessment queries - prioritize finding existing questions
-            print(f"   📋 Building INITIAL phase queries (expect 4 queries)")
-            queries.extend([
-                {
-                    "query": f"{body_region} pain assessment protocol clinical examination questions",
-                    "priority": ClinicalPriority.HIGH,
-                    "search_for_questions": True
-                },
-                {
-                    "query": f"{body_region} pain history taking essential questions",
-                    "priority": ClinicalPriority.HIGH,
-                    "search_for_questions": True
-                },
-                {
-                    "query": f"comment décrirais-tu douleur {body_region}",  # Search for French questions
-                    "priority": ClinicalPriority.HIGH,
-                    "search_for_questions": True
-                },
-                {
-                    "query": f"{base_query} {body_region} symptoms evaluation",
-                    "priority": ClinicalPriority.MEDIUM
-                }
-            ])
-
-        elif phase == AssessmentPhase.DETAILED:
-            # Detailed examination queries
-            print(f"   📋 Building DETAILED phase queries (expect 2 queries)")
-            queries.extend([
-                {
-                    "query": f"{body_region} physical examination techniques tests",
-                    "priority": ClinicalPriority.HIGH
-                },
-                {
-                    "query": f"{base_query} detailed assessment {body_region}",
-                    "priority": ClinicalPriority.MEDIUM
-                }
-            ])
-
-        elif phase == AssessmentPhase.DIFFERENTIAL:
-            # Differential diagnosis queries
-            print(f"   📋 Building DIFFERENTIAL phase queries")
-            suspected_conditions = clinical_analysis.get("suspected_conditions", [])
-            if suspected_conditions:
-                print(f"      Found {len(suspected_conditions)} suspected conditions, using top 3")
-                for condition_info in suspected_conditions[:3]:  # Top 3 conditions
-                    condition = condition_info["condition"]
-                    queries.append({
-                        "query": f"{body_region} {condition} differential diagnosis assessment",
-                        "priority": ClinicalPriority.HIGH
-                    })
-            else:
-                print(f"      No suspected conditions, using general differential query")
-                queries.append({
-                    "query": f"{body_region} pain differential diagnosis common conditions",
-                    "priority": ClinicalPriority.HIGH
-                })
-
-        elif phase == AssessmentPhase.SUMMARY:
-            # Summary and treatment queries
-            print(f"   📋 Building SUMMARY phase queries (expect 2 queries)")
-            queries.extend([
-                {
-                    "query": f"{body_region} pain management recommendations treatment",
-                    "priority": ClinicalPriority.HIGH
-                },
-                {
-                    "query": f"{body_region} assessment summary clinical documentation",
-                    "priority": ClinicalPriority.MEDIUM
-                }
-            ])
-        
-        # Skip red flag queries - simplified approach
-
-        # Add memory-informed queries
-        if memory_context.get("treatments_tried"):
-            print(f"   📋 Adding memory-informed query (treatments_tried found)")
-            queries.append({
-                "query": f"{body_region} alternative treatments options",
-                "priority": ClinicalPriority.MEDIUM
-            })
-
-        print(f"🔍 QUERY BUILDER: Generated {len(queries)} dynamic queries for {phase.value.upper()} phase")
-        for i, q in enumerate(queries, 1):
-            print(f"   Query {i}: '{q['query'][:80]}...' [priority={q['priority'].value if hasattr(q['priority'], 'value') else q['priority']}]")
-        return queries
 
     def _chunk_contains_questions(self, text: str) -> bool:
         """Check if a text chunk contains questions (French guillemets or question marks)."""
@@ -771,36 +566,6 @@ class EnhancedRAGAssessmentRetriever:
             except Exception as _e:
                 print(f"⚠️ Failed to print consolidated item #{idx}: {_e}")
         return consolidated
-    
-    def _generate_knowledge_recommendations(self,
-                                          phase: AssessmentPhase) -> Dict[str, Any]:
-        """Generate recommendations based on retrieved knowledge and clinical analysis."""
-        recommendations = {
-            "next_questions_focus": [],
-            "clinical_priorities": [],
-            "knowledge_gaps": [],
-            "assessment_direction": ""
-        }
-        
-        # Phase-specific recommendations
-        if phase == AssessmentPhase.INITIAL:
-            recommendations["next_questions_focus"] = [
-                "Pain onset and duration",
-                "Pain characteristics and location",
-                "Aggravating and relieving factors"
-            ]
-            
-        elif phase == AssessmentPhase.DETAILED:
-            recommendations["next_questions_focus"] = [
-                "Functional limitations",
-                "Previous treatments",
-                "Associated symptoms"
-            ]
-        
-        # Simple clinical priority recommendations
-        recommendations["assessment_direction"] = "Continue with comprehensive assessment"
-        
-        return recommendations
 
 
 # Initialize global enhanced retriever
