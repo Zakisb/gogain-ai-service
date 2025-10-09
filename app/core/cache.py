@@ -37,6 +37,10 @@ def _pain_msgs_key(user_id: str) -> str:
 def _pain_active_key(user_id: str) -> str:
     return f"pain:active:{user_id}"
 
+
+def _pain_body_region_key(user_id: str) -> str:
+    return f"pain:body_region:{user_id}"
+
 # --- Conversation history ---
 async def get_conversation_history(user_id: str, limit: int = 3) -> List[Dict[str, str]]:
     try:
@@ -136,3 +140,23 @@ async def is_pain_agent_session_active(user_id: str) -> bool:
         return (await r.get(_pain_active_key(user_id))) == "1"
     except Exception:
         return False
+
+
+async def set_pain_session_body_region(user_id: str, body_region: str) -> None:
+    """Store body region for pain session (extracted from agent's RAG tool calls)."""
+    try:
+        r = get_redis()
+        await r.set(_pain_body_region_key(user_id), body_region, ex=PAIN_SESSION_TTL_SECONDS)
+        logger.info(f"🔍 Stored body_region '{body_region}' for pain session {user_id}")
+    except Exception as e:
+        logger.warning(f"Failed to store body_region for {user_id}: {e}")
+
+
+async def get_pain_session_body_region(user_id: str) -> str:
+    """Get body region for pain session (defaults to 'general' if not set)."""
+    try:
+        r = get_redis()
+        region = await r.get(_pain_body_region_key(user_id))
+        return region if region else "general"
+    except Exception:
+        return "general"

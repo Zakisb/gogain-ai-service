@@ -170,7 +170,7 @@ def add_questions_to_queue(
 
     queue_key = _questions_queue_key(user_id, body_region)
 
-    # Get existing queue to check for duplicates
+    # Get existing queue to check for duplicates (only check queue, not conversation history)
     try:
         existing_questions = redis_client.lrange(queue_key, 0, -1)
         existing_set = set()
@@ -187,10 +187,7 @@ def add_questions_to_queue(
     except Exception:
         existing_set = set()
 
-    # Also check conversation history for duplicates
-    history_lower = conversation_history.lower() if conversation_history else ""
-
-    # Filter out duplicates (simple string list)
+    # Filter out duplicates (only within queue and current batch, no conversation history check)
     new_questions = []
     added_count = 0
     skipped_count = 0
@@ -208,12 +205,6 @@ def add_questions_to_queue(
         # Skip if already in queue
         if question_lower in existing_set:
             logger.debug(f"🔁 [Queue] Skipping duplicate in queue: {question_text[:80]}")
-            skipped_count += 1
-            continue
-
-        # Skip if already in conversation history (simple check)
-        if question_lower in history_lower:
-            logger.debug(f"🔁 [Queue] Skipping already asked: {question_text[:80]}")
             skipped_count += 1
             continue
 
@@ -1266,8 +1257,8 @@ def create_llm_driven_rag_tool() -> FunctionTool:
             reverse=True
         )
 
-        # Return top 20 questions to avoid overwhelming the AI
-        return all_questions[:20]
+        # Return top 30 questions for better coverage of technique/training questions
+        return all_questions[:30]
 
     def _collect_examples(
         consolidated_results: List[Dict[str, Any]],
@@ -1349,6 +1340,28 @@ def create_llm_driven_rag_tool() -> FunctionTool:
 
         hyde_text = hyde_snippet.strip() if isinstance(hyde_snippet, str) else ""
         user_id = _user_id_context.get()
+
+        # Store body_region in pain session (used for queue context injection)
+        try:
+            import asyncio
+            from app.core.cache import set_pain_session_body_region
+
+            # Run async function in sync context
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            if loop.is_running():
+                # If loop is already running, schedule coroutine as task
+                asyncio.create_task(set_pain_session_body_region(user_id, body_region))
+            else:
+                # If loop not running, run coroutine synchronously
+                loop.run_until_complete(set_pain_session_body_region(user_id, body_region))
+        except Exception as e:
+            logger.warning(f"Failed to store body_region in session: {e}")
 
         # Persist submitted queries immediately for observability
         _store_queries_in_queue(
@@ -1479,164 +1492,16 @@ def create_llm_driven_rag_tool() -> FunctionTool:
     )
 
 
-def create_queue_management_tools() -> List[FunctionTool]:
-    """Create tools for managing the questions queue."""
-
-    def add_questions_to_my_queue(
-        body_region: str,
-        questions: List[str],
-    ) -> str:
-        """Add extracted questions to your assessment queue.
-
-        Call this IMMEDIATELY after receiving RAG results to store the top 3-4 questions.
-        The queue automatically filters out duplicates and questions already asked.
-
-        Args:
-            body_region: Body region being assessed (e.g., "dos", "genou")
-            questions: List of 3-4 best questions to add to queue
-
-        Returns:
-            Status message confirming questions were added
-        """
-        user_id = _user_id_context.get()
-
-        # Get conversation history from context if available
-        conversation_history = ""
-
-        logger.info(f"🔧 [Tool] add_questions_to_my_queue called for user={user_id} region={body_region}")
-        print(f"🔧 [Tool] Adding {len(questions)} questions to queue for user={user_id}")
-
-        add_questions_to_queue(user_id, body_region, questions, conversation_history)
-
-        return f"Successfully added {len(questions)} questions to your queue. Queue ready for next assessment turn."
-
-    def get_next_question() -> str:
-        """Get the next unasked question from your queue.
-
-        Call this when you're ready to ask the user a question from your queue.
-        Returns the next question or indicates if queue is empty.
-
-        Returns:
-            Next question string or empty queue indicator
-        """
-        user_id = _user_id_context.get()
-
-        # Try to infer body region from recent context (simplified)
-        # In production, you'd pass this as a parameter or store it in context
-        body_region = "general"  # Default fallback
-
-        logger.info(f"🔧 [Tool] get_next_question called for user={user_id}")
-
-        question = get_next_question_from_queue(user_id, body_region)
-
-        if question:
-            return f"NEXT_QUESTION: {question}"
-        else:
-            return "QUEUE_EMPTY: No more questions in queue. Consider calling RAG again if assessment incomplete."
-
-    def mark_current_question_asked(
-        body_region: str,
-        question_text: str,
-    ) -> str:
-        """Mark a question as asked after the user responds.
-
-        Call this IMMEDIATELY after asking a question from your queue and receiving the user's answer.
-        The agent is responsible for tracking conversational turns and deciding when to refresh the queue.
-
-        Args:
-            body_region: Body region being assessed
-            question_text: The exact question you just asked
-
-        Returns:
-            Status message confirming the update
-        """
-        user_id = _user_id_context.get()
-
-        logger.info(f"🔧 [Tool] mark_current_question_asked called for user={user_id}")
-
-        success = mark_question_as_asked(user_id, body_region, question_text)
-
-        if success:
-            return (
-                "Question marked as asked. Keep track of your exchanges and trigger "
-                "retrieve_with_llm_queries after roughly two turns so the queue stays fresh."
-            )
-        else:
-            return (
-                "Unable to mark question as asked. Ensure the exact question text matches "
-                "what was stored in the queue."
-            )
-
-    def clear_my_queue(body_region: str) -> str:
-        """Clear your questions queue before adding new questions from fresh RAG results.
-
-        Call this AFTER triggering a new RAG call and BEFORE adding new questions.
-
-        Args:
-            body_region: Body region being assessed
-
-        Returns:
-            Confirmation message
-        """
-        user_id = _user_id_context.get()
-
-        logger.info(f"🔧 [Tool] clear_my_queue called for user={user_id} region={body_region}")
-
-        clear_questions_queue(user_id, body_region)
-
-        return f"Queue cleared for user={user_id}. Ready to add new questions from RAG."
-
-    def check_queue_status(body_region: str) -> str:
-        """Check current queue status (for debugging).
-
-        Args:
-            body_region: Body region being assessed
-
-        Returns:
-            Queue status with counts
-        """
-        user_id = _user_id_context.get()
-
-        state = get_full_queue_state(user_id, body_region)
-
-        return json.dumps(state, indent=2)
-
-    return [
-        FunctionTool.from_defaults(
-            fn=add_questions_to_my_queue,
-            name="add_questions_to_my_queue",
-            description=(
-                "Add 3-4 best questions from RAG results to your queue. "
-                "Call immediately after retrieve_with_llm_queries returns. "
-                "Automatically filters duplicates."
-            )
-        ),
-        FunctionTool.from_defaults(
-            fn=mark_current_question_asked,
-            name="mark_current_question_asked",
-            description=(
-                "Mark question as asked after user responds. "
-                "You (the agent) are responsible for triggering RAG—aim for every ~2 exchanges to keep the queue stocked."
-            )
-        ),
-        FunctionTool.from_defaults(
-            fn=clear_my_queue,
-            name="clear_my_queue",
-            description=(
-                "Clear queue before adding new questions from fresh RAG. "
-                "Call after triggering RAG, before add_questions_to_my_queue."
-            )
-        ),
-        FunctionTool.from_defaults(
-            fn=check_queue_status,
-            name="check_queue_status",
-            description="Check current queue status for debugging."
-        ),
-    ]
+# Queue management tools removed - queue contents are now fed directly into agent context
+# The agent uses questions as inspiration without needing tools to access the queue
 
 
 def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:
-    """Get tools for AI-powered pain assessment with LLM-driven RAG (queue tools removed for mental queue approach)."""
+    """Get tools for AI-powered pain assessment with LLM-driven RAG.
+
+    Queue contents are fed directly into agent context for inspiration.
+    Agent manages questions autonomously based on conversation history.
+    """
     from app.tools.date_tool import get_date_tool
 
     tools = [
@@ -1645,8 +1510,5 @@ def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:
         create_pain_session_exit_tool(),
         get_date_tool()
     ]
-
-    # Queue management tools removed - agent now uses mental queue based on conversation history
-    # The agent generates rag_queries autonomously and manages question selection via history
 
     return tools

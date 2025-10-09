@@ -135,12 +135,14 @@ def build_message_array_context(history, current_message, user_memories=None, li
     return messages
 
 
-async def build_pain_agent_context(user_id: str, current_message: str, user_memories=None, include_memories=True):
+async def build_pain_agent_context(user_id: str, current_message: str, body_region: str = "general", user_memories=None, include_memories=True):
     """Build isolated context for pain agent using only pain session messages.
 
     This ensures the pain agent sees only messages from the current pain assessment
     session, not the full conversation history. Messages are still stored in the
     global history for the router to see.
+
+    Also injects available questions from the Redis queue into the context.
     """
     messages = []
 
@@ -159,6 +161,25 @@ async def build_pain_agent_context(user_id: str, current_message: str, user_memo
                 "role": "system",
                 "content": system_context
             })
+
+    # Inject questions queue into context (if available)
+    try:
+        from app.knowledge.enhanced_assessment_tools import get_full_queue_state
+        queue_state = get_full_queue_state(user_id, body_region)
+        questions = queue_state.get("questions", [])
+
+        if questions:
+            queue_context = "QUESTIONS SUGGÉRÉES (inspirations pour ton prochain question):\n"
+            for idx, q in enumerate(questions[:15], 1):  # Limit to top 15 for better coverage
+                queue_context += f"{idx}. {q}\n"
+
+            messages.append({
+                "role": "system",
+                "content": queue_context
+            })
+            logger.info(f"📋 Injected {len(questions[:15])} suggested questions into pain agent context")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to inject queue into context: {e}")
 
     # Get isolated pain session history
     pain_history = await get_pain_agent_session_history(user_id)
@@ -267,16 +288,23 @@ def emit_vc_event(event_type: str, content: Any) -> str:
 
 
 def unwrap_pain_agent_response(response_text: str) -> str:
-    """Parse pain agent structured JSON response and unwrap conclusions.
+    """Parse pain agent structured JSON response and transform to frontend-compatible format.
+
+    Frontend expects questions in this format:
+    <question_text>
+    ```json
+    {"id": "option1", "label": "First option"}
+    {"id": "option2", "label": "Second option"}
+    ```
 
     If response_type is "conclusion", extract the plain text from the conclusion field.
-    If response_type is "question", keep the JSON intact for the frontend.
+    If response_type is "question", transform to markdown format with newline-separated JSON objects.
 
     Args:
         response_text: The raw response from pain agent (possibly JSON)
 
     Returns:
-        Either the original JSON (for questions) or unwrapped text (for conclusions)
+        Either transformed markdown format (for questions) or plain text (for conclusions)
     """
     try:
         # Try to parse as JSON
@@ -292,9 +320,24 @@ def unwrap_pain_agent_response(response_text: str) -> str:
                 logger.info(f"🔓 Unwrapped pain agent conclusion ({len(conclusion_text)} chars)")
                 return conclusion_text
             elif response_type == "question":
-                # Keep question JSON intact - frontend expects this format
-                logger.info(f"❓ Keeping pain agent question in JSON format")
-                return response_text
+                # Transform to frontend format: question_text\n```json\n{options}\n```
+                question_text = parsed.get("question", "")
+                options = parsed.get("options", [])
+
+                if not question_text or not options:
+                    logger.warning("⚠️ Malformed question JSON, returning as-is")
+                    return response_text  # Fallback to original if malformed
+
+                # Build frontend-compatible format
+                output = question_text + "\n```json\n"
+                for option in options:
+                    if isinstance(option, dict) and "id" in option and "label" in option:
+                        # One JSON object per line, no commas between objects
+                        output += json.dumps(option, ensure_ascii=False) + "\n"
+                output += "```"
+
+                logger.info(f"❓ Transformed pain agent question to frontend format ({len(options)} options)")
+                return output
 
         # Not a structured response, return as-is
         return response_text
@@ -362,11 +405,17 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # after workflow execution to confirm pain agent actually handled it
             if await is_pain_agent_session_active(user_id):
                 logger.info(f"🔴 Pain session ACTIVE - building agent context from isolated session for {user_id}")
+                # Get body_region from pain session (set by RAG tool calls)
+                from app.core.cache import get_pain_session_body_region
+                body_region = await get_pain_session_body_region(user_id)
+                logger.info(f"🔍 Retrieved body_region '{body_region}' for pain session context")
+
                 # Build context from pain session only (isolated, fresh context)
                 # The current user message will be added by build_pain_agent_context
                 agent_messages = await build_pain_agent_context(
                     user_id=user_id,
                     current_message=user_message,
+                    body_region=body_region,
                     user_memories=[],
                     include_memories=False,
                 )
