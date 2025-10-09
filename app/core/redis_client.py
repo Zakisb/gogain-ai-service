@@ -15,9 +15,14 @@ from functools import lru_cache
 from typing import Optional
 
 try:
-    import redis.asyncio as redis  # type: ignore
-except Exception as e:  # pragma: no cover - import guard
-    redis = None  # Will raise at runtime if used without dependency installed
+    import redis.asyncio as redis_async  # type: ignore
+except Exception:  # pragma: no cover - import guard
+    redis_async = None  # Will raise at runtime if used without dependency installed
+
+try:
+    import redis as redis_sync  # type: ignore
+except Exception:  # pragma: no cover - import guard
+    redis_sync = None  # Will raise at runtime if used without dependency installed
 
 
 def _build_redis_url() -> str:
@@ -41,10 +46,24 @@ def get_redis() -> "redis.Redis":
 
     Raises RuntimeError if `redis` package is not installed.
     """
-    if redis is None:
+    if redis_async is None:
         raise RuntimeError(
             "Redis dependency not installed. Add 'redis' to requirements/minreqs."
         )
     url = _build_redis_url()
-    return redis.from_url(url, encoding="utf-8", decode_responses=True)
+    return redis_async.from_url(url, encoding="utf-8", decode_responses=True)
 
+
+@lru_cache(maxsize=1)
+def get_sync_redis() -> "redis.Redis":
+    """Return a shared synchronous Redis client instance.
+
+    Useful when Redis access is needed from synchronous workflows (e.g., tool functions)
+    where awaiting async operations is impractical.
+    """
+    if redis_sync is None:
+        raise RuntimeError(
+            "Redis dependency not installed. Add 'redis' to requirements/minreqs."
+        )
+    url = _build_redis_url()
+    return redis_sync.from_url(url, encoding="utf-8", decode_responses=True)

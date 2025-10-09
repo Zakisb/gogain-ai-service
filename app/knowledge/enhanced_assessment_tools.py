@@ -1,12 +1,15 @@
 """Enhanced AI-powered assessment tools with memory integration and clinical reasoning."""
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 import json
 import re
+import os
 import concurrent.futures
+import threading
 import contextvars
 from enum import Enum
+from datetime import datetime
 from llama_index.core.tools import FunctionTool
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -14,6 +17,7 @@ from llama_index.core.retrievers import VectorIndexRetriever
 from qdrant_client import QdrantClient
 from app.core.config import QDRANT_URL
 from app.core.embeddings import configure_global_embedding
+from app.core.redis_client import get_sync_redis
 # TEMPORARILY DISABLED: from app.core.memory import get_mem0_client
 # Removed import of deleted tools.py file
 
@@ -41,6 +45,386 @@ _CACHED_PAIN_QUESTIONS: dict[tuple[str, str], set[str]] = {}
 # Cache for RAG knowledge results - only fetch once during INITIAL phase
 # Keyed by (context_key, body_region) -> Dict containing knowledge_results and metadata
 _CACHED_RAG_KNOWLEDGE: dict[tuple[str, str], Dict[str, Any]] = {}
+
+_QUERY_QUEUE_TTL_SECONDS = int(os.getenv("PAIN_RAG_QUERY_TTL_SECONDS", "900"))
+_QUERY_QUEUE_MAX_LENGTH = int(os.getenv("PAIN_RAG_QUERY_MAX_LENGTH", "50"))
+
+# Questions queue configuration
+_QUESTIONS_QUEUE_TTL_SECONDS = int(os.getenv("PAIN_QUESTIONS_QUEUE_TTL_SECONDS", "1800"))  # 30 minutes
+_QUESTIONS_QUEUE_MAX_LENGTH = int(os.getenv("PAIN_QUESTIONS_QUEUE_MAX_LENGTH", "10"))  # Max 10 questions in queue
+
+
+def _sanitize_for_key(value: str) -> str:
+    """Sanitize identifiers for safe Redis key usage."""
+    if not value:
+        return "unknown"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value)
+
+
+def _query_queue_key(user_id: str, body_region: str) -> str:
+    """Build Redis key for storing agent-generated RAG queries."""
+    safe_user = _sanitize_for_key(user_id)
+    safe_region = _sanitize_for_key(body_region)
+    return f"pain:rag_queries:{safe_user}:{safe_region}"
+
+
+def _questions_queue_key(user_id: str, body_region: str) -> str:
+    """Build Redis key for storing extracted questions queue for pain assessment."""
+    safe_user = _sanitize_for_key(user_id)
+    safe_region = _sanitize_for_key(body_region)
+    return f"pain:questions_queue:{safe_user}:{safe_region}"
+
+
+def _store_queries_in_queue(
+    user_id: str,
+    body_region: str,
+    queries: List[str],
+    hyde_snippet: Optional[str],
+    conversation_history: str,
+    source: str = "agent",
+) -> None:
+    """Persist agent-generated queries in Redis for reuse/background processing."""
+    if not queries:
+        return
+
+    snapshot = conversation_history[:500] if conversation_history else ""
+    timestamp = datetime.utcnow().isoformat()
+
+    try:
+        redis_client = get_sync_redis()
+    except Exception as exc:  # pragma: no cover - Redis optional at runtime
+        logger.warning(
+            "RAG query cache unavailable (sync Redis client failure): %s", exc
+        )
+        return
+
+    entries: List[str] = []
+    for query in queries:
+        if not isinstance(query, str):
+            continue
+        cleaned = query.strip()
+        if not cleaned:
+            continue
+        entry = {
+            "query": cleaned,
+            "body_region": body_region,
+            "hyde_snippet": (hyde_snippet or "").strip(),
+            "conversation_context_preview": snapshot,
+            "created_at": timestamp,
+            "source": source,
+        }
+        entries.append(json.dumps(entry, ensure_ascii=False))
+
+    if not entries:
+        return
+
+    key = _query_queue_key(user_id or "unknown_user", body_region)
+    try:
+        pipeline = redis_client.pipeline()
+        pipeline.rpush(key, *entries)
+        pipeline.ltrim(key, -_QUERY_QUEUE_MAX_LENGTH, -1)
+        pipeline.expire(key, _QUERY_QUEUE_TTL_SECONDS)
+        pipeline.execute()
+        logger.debug(
+            "Stored %d RAG queries in Redis queue for user=%s region=%s",
+            len(entries),
+            user_id,
+            body_region,
+        )
+    except Exception as exc:  # pragma: no cover - Redis errors handled gracefully
+        logger.warning(
+            "Failed to persist RAG queries for user=%s region=%s: %s",
+            user_id,
+            body_region,
+            exc,
+        )
+
+
+# ============================================================================
+# QUESTIONS QUEUE MANAGEMENT (Redis-backed, multi-user support)
+# ============================================================================
+
+def add_questions_to_queue(
+    user_id: str,
+    body_region: str,
+    questions: List[str],
+    conversation_history: str = "",
+) -> None:
+    """Add extracted questions to user's queue (Redis-backed, simple list storage).
+
+    Args:
+        user_id: User identifier
+        body_region: Body region being assessed
+        questions: List of question strings to add to queue
+        conversation_history: Recent conversation context for deduplication
+    """
+    if not questions:
+        logger.info(f"🚫 [Queue] No questions to add for user={user_id} region={body_region}")
+        return
+
+    try:
+        redis_client = get_sync_redis()
+    except Exception as exc:
+        logger.warning(f"⚠️ [Queue] Redis unavailable for user={user_id}: {exc}")
+        return
+
+    queue_key = _questions_queue_key(user_id, body_region)
+
+    # Get existing queue to check for duplicates
+    try:
+        existing_questions = redis_client.lrange(queue_key, 0, -1)
+        existing_set = set()
+        for item in existing_questions:
+            try:
+                # Support both old format (dict) and new format (string)
+                if item.startswith('{'):
+                    data = json.loads(item)
+                    existing_set.add(data.get("question", "").strip().lower())
+                else:
+                    existing_set.add(item.strip().lower())
+            except:
+                existing_set.add(item.strip().lower())
+    except Exception:
+        existing_set = set()
+
+    # Also check conversation history for duplicates
+    history_lower = conversation_history.lower() if conversation_history else ""
+
+    # Filter out duplicates (simple string list)
+    new_questions = []
+    added_count = 0
+    skipped_count = 0
+
+    for question in questions:
+        if not isinstance(question, str):
+            continue
+
+        question_text = question.strip()
+        if not question_text:
+            continue
+
+        question_lower = question_text.lower()
+
+        # Skip if already in queue
+        if question_lower in existing_set:
+            logger.debug(f"🔁 [Queue] Skipping duplicate in queue: {question_text[:80]}")
+            skipped_count += 1
+            continue
+
+        # Skip if already in conversation history (simple check)
+        if question_lower in history_lower:
+            logger.debug(f"🔁 [Queue] Skipping already asked: {question_text[:80]}")
+            skipped_count += 1
+            continue
+
+        new_questions.append(question_text)  # Just store the string
+        existing_set.add(question_lower)  # Prevent duplicates within this batch
+        added_count += 1
+
+    if not new_questions:
+        logger.info(f"🚫 [Queue] All {len(questions)} questions were duplicates for user={user_id}")
+        return
+
+    # Replace entire queue with new questions (no append, always fresh)
+    try:
+        pipeline = redis_client.pipeline()
+        pipeline.delete(queue_key)  # Clear old queue
+        pipeline.rpush(queue_key, *new_questions)  # Add new questions
+        pipeline.expire(queue_key, _QUESTIONS_QUEUE_TTL_SECONDS)
+        pipeline.execute()
+
+        logger.info(
+            f"✅ [Queue] Replaced queue with {added_count} questions (skipped {skipped_count} duplicates) "
+            f"for user={user_id} region={body_region}"
+        )
+
+        # Log current queue state
+        _log_queue_state(user_id, body_region)
+
+    except Exception as exc:
+        logger.error(f"❌ [Queue] Failed to add questions for user={user_id}: {exc}")
+
+
+def get_next_question_from_queue(
+    user_id: str,
+    body_region: str,
+) -> Optional[str]:
+    """Get next question from queue without removing it (peek).
+
+    Returns None if queue is empty.
+    """
+    try:
+        redis_client = get_sync_redis()
+    except Exception as exc:
+        logger.warning(f"⚠️ [Queue] Redis unavailable for user={user_id}: {exc}")
+        return None
+
+    queue_key = _questions_queue_key(user_id, body_region)
+
+    try:
+        # Get first unasked question
+        items = redis_client.lrange(queue_key, 0, -1)
+
+        for idx, item in enumerate(items):
+            try:
+                data = json.loads(item)
+                if not data.get("asked", False):
+                    question = data.get("question", "")
+                    logger.info(
+                        f"👀 [Queue] Next question for user={user_id}: '{question[:80]}...'"
+                    )
+                    return question
+            except Exception:
+                continue
+
+        logger.info(f"🏁 [Queue] No more questions for user={user_id} region={body_region}")
+        return None
+
+    except Exception as exc:
+        logger.error(f"❌ [Queue] Failed to get next question for user={user_id}: {exc}")
+        return None
+
+
+def mark_question_as_asked(
+    user_id: str,
+    body_region: str,
+    question: str,
+) -> bool:
+    """Mark a question as asked in the current queue.
+
+    Returns:
+        True if the question was found and marked, False otherwise.
+    """
+    try:
+        redis_client = get_sync_redis()
+    except Exception as exc:
+        logger.warning(f"⚠️ [Queue] Redis unavailable for user={user_id}: {exc}")
+        return False
+
+    queue_key = _questions_queue_key(user_id, body_region)
+
+    try:
+        # Find and mark the question as asked
+        items = redis_client.lrange(queue_key, 0, -1)
+        question_lower = question.strip().lower()
+
+        for idx, item in enumerate(items):
+            try:
+                data = json.loads(item)
+                if data.get("question", "").strip().lower() == question_lower:
+                    # Mark as asked
+                    data["asked"] = True
+                    data["asked_at"] = datetime.utcnow().isoformat()
+                    redis_client.lset(queue_key, idx, json.dumps(data, ensure_ascii=False))
+
+                    logger.info(
+                        f"✓ [Queue] Marked as asked for user={user_id}: "
+                        f"'{question[:80]}...'"
+                    )
+
+                    # Log current queue state
+                    _log_queue_state(user_id, body_region)
+
+                    return True
+            except Exception:
+                continue
+
+        logger.warning(f"⚠️ [Queue] Question not found in queue for user={user_id}")
+        return False
+
+    except Exception as exc:
+        logger.error(f"❌ [Queue] Failed to mark question as asked for user={user_id}: {exc}")
+        return False
+
+
+def clear_questions_queue(user_id: str, body_region: str) -> None:
+    """Clear questions queue (called when reloading queue with new RAG results)."""
+    try:
+        redis_client = get_sync_redis()
+        queue_key = _questions_queue_key(user_id, body_region)
+
+        redis_client.delete(queue_key)
+
+        logger.info(f"🧹 [Queue] Cleared queue for user={user_id} region={body_region}")
+
+    except Exception as exc:
+        logger.error(f"❌ [Queue] Failed to clear queue for user={user_id}: {exc}")
+
+
+def _log_queue_state(user_id: str, body_region: str) -> None:
+    """Log current state of questions queue for debugging."""
+    try:
+        redis_client = get_sync_redis()
+        queue_key = _questions_queue_key(user_id, body_region)
+
+        items = redis_client.lrange(queue_key, 0, -1)
+        total = len(items)
+
+        logger.info(
+            f"📊 [Queue State] user={user_id} region={body_region} | "
+            f"Total questions: {total}"
+        )
+
+        # Log each question in queue (simple string format)
+        for idx, item in enumerate(items, 1):
+            try:
+                # Support both old dict format and new string format
+                if isinstance(item, bytes):
+                    item = item.decode('utf-8')
+
+                if item.startswith('{'):
+                    data = json.loads(item)
+                    question = data.get("question", "")
+                else:
+                    question = item
+
+                logger.info(f"  [{idx}] {question[:100]}")
+            except Exception:
+                logger.info(f"  [{idx}] {item[:100]}")
+                continue
+
+    except Exception as exc:
+        logger.debug(f"Failed to log queue state for user={user_id}: {exc}")
+
+
+def get_full_queue_state(user_id: str, body_region: str) -> Dict[str, Any]:
+    """Get full queue state for debugging/monitoring (simplified)."""
+    try:
+        redis_client = get_sync_redis()
+        queue_key = _questions_queue_key(user_id, body_region)
+
+        items = redis_client.lrange(queue_key, 0, -1)
+
+        questions = []
+        for item in items:
+            try:
+                if isinstance(item, bytes):
+                    item = item.decode('utf-8')
+
+                # Support both old dict format and new string format
+                if item.startswith('{'):
+                    data = json.loads(item)
+                    questions.append(data.get("question", ""))
+                else:
+                    questions.append(item)
+            except:
+                questions.append(str(item))
+
+        return {
+            "user_id": user_id,
+            "body_region": body_region,
+            "total_questions": len(questions),
+            "questions": questions,  # Simple list of strings
+        }
+    except Exception as exc:
+        logger.error(f"Failed to get queue state for user={user_id}: {exc}")
+        return {
+            "user_id": user_id,
+            "body_region": body_region,
+            "error": str(exc),
+            "questions": [],
+        }
+
 
 PRIMARY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks_v2"
 LEGACY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks"
@@ -604,9 +988,6 @@ def create_pain_summary_generator_tool() -> FunctionTool:
         logger.warning(f"🔥 OPENAI AGENT TOOL: generate_adaptive_pain_summary called for {body_region}, user: {user_id}")
         print(f"🏁 ASSESSMENT COMPLETE - Summary tailored to available information")
 
-        from datetime import datetime
-        import os
-
         # Start with essential completion signal and metadata
         timestamp = datetime.now()
         summary = {
@@ -667,18 +1048,159 @@ def create_pain_summary_generator_tool() -> FunctionTool:
 
         print(f"✅ Generated adaptive summary with {len(summary)} main components")
 
-        # Clear cached questions after summary generation (simple global clear)
+        # Clear ALL cached assessment state after summary generation (assessment concluded)
         try:
             _CACHED_PAIN_QUESTIONS.clear()
-            print("🧹 CACHE: Cleared cached pain questions after summary generation")
+            _CACHED_RAG_KNOWLEDGE.clear()
+            logger.info("🧹 CACHE: Cleared all assessment caches (questions + RAG knowledge) after summary generation")
+            print("🧹 ASSESSMENT COMPLETE: Cleared all temporary assessment state")
         except Exception as e:
-            print(f"⚠️ Failed to clear cached questions: {e}")
+            logger.warning(f"⚠️ Failed to clear assessment caches: {e}")
+            print(f"⚠️ Failed to clear cached state: {e}")
+
+        # Flush pain session state (background RAG buffers, etc.) for this user
+        try:
+            # Import session state management from chat API
+            import sys
+            import asyncio
+
+            # Dynamically import to avoid circular dependency
+            if 'app.api.chat' in sys.modules:
+                chat_module = sys.modules['app.api.chat']
+                clear_pain_session_state = getattr(chat_module, 'clear_pain_session_state', None)
+
+                async def _cleanup_async():
+                    if clear_pain_session_state:
+                        await clear_pain_session_state(user_id, body_region)
+
+                # Run async function in event loop if available
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(_cleanup_async())
+                    else:
+                        loop.run_until_complete(_cleanup_async())
+                    logger.info(f"🧹 Flushed pain session state for user={user_id} region={body_region}")
+                except RuntimeError:
+                    # If no event loop, try to create one
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    new_loop.run_until_complete(_cleanup_async())
+                    new_loop.close()
+                    logger.info(f"🧹 Flushed pain session state for user={user_id} region={body_region} (new loop)")
+            else:
+                logger.debug("app.api.chat module not loaded, skipping session state flush")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to flush pain session state: {e}")
+            # Don't fail the summary generation if session flush fails
+
+        # Clear the user's question queue so next assessment starts fresh
+        try:
+            clear_questions_queue(user_id, body_region)
+            logger.info("🧹 Queue cleared after summary for user=%s region=%s", user_id, body_region)
+        except Exception as e:
+            logger.warning("⚠️ Failed to clear questions queue after summary for user=%s region=%s: %s", user_id, body_region, e)
+
         return json.dumps(summary, indent=2)
 
     return FunctionTool.from_defaults(
         fn=generate_adaptive_pain_summary,
         name="generate_adaptive_pain_summary",
         description="Generate flexible, adaptive pain summary that adjusts structure and content based on available information - no rigid templates."
+    )
+
+
+def create_pain_session_exit_tool() -> FunctionTool:
+    """Create tool allowing the agent to exit pain assessment mode explicitly."""
+
+    def exit_pain_assessment(body_region: str = "general") -> str:
+        user_id = _user_id_context.get()
+        safe_user = _sanitize_for_key(user_id or "unknown_user")
+
+        print(f"🚪 Pain session exit tool invoked for user={safe_user}, region={body_region}")
+        logger.info(
+            "🚪 Pain session exit requested by agent for user=%s region=%s",
+            user_id,
+            body_region,
+        )
+
+        # Clear Redis-backed queue so next assessment starts clean
+        try:
+            clear_questions_queue(user_id, body_region)
+            logger.info(
+                "🧹 Queue cleared via exit tool for user=%s region=%s",
+                user_id,
+                body_region,
+            )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ Failed to clear queue during exit tool for user=%s region=%s: %s",
+                user_id,
+                body_region,
+                exc,
+            )
+
+        # End the pain session flags and clear in-memory session state
+        try:
+            import sys
+            import asyncio
+
+            if 'app.api.chat' in sys.modules:
+                chat_module = sys.modules['app.api.chat']
+                end_session = getattr(chat_module, 'end_pain_agent_session', None)
+                clear_state = getattr(chat_module, 'clear_pain_session_state', None)
+
+                loop = None
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = None
+
+                async def _cleanup():
+                    if end_session:
+                        await end_session(user_id)
+                        logger.info("🧹 Redis pain session flag cleared for user=%s", user_id)
+                    if clear_state:
+                        await clear_state(user_id, body_region)
+                        logger.info("🧹 In-memory pain session state cleared for user=%s region=%s", user_id, body_region)
+
+                if loop and loop.is_running():
+                    asyncio.create_task(_cleanup())
+                else:
+                    if loop is None:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(_cleanup())
+                        finally:
+                            loop.close()
+                            asyncio.set_event_loop(None)
+                    else:
+                        loop.run_until_complete(_cleanup())
+            else:
+                logger.debug(
+                    "app.api.chat not in sys.modules; skipping session flag cleanup for user=%s",
+                    user_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "⚠️ Failed to flush pain session state during exit tool for user=%s region=%s: %s",
+                user_id,
+                body_region,
+                exc,
+            )
+
+        return (
+            "Pain assessment session closed. Route the user back to the central assistant and acknowledge the context switch."
+        )
+
+    return FunctionTool.from_defaults(
+        fn=exit_pain_assessment,
+        name="exit_pain_assessment",
+        description=(
+            "Terminate the current pain assessment session immediately, clear queued questions, "
+            "and hand control back to the central router when the user changes topic."
+        ),
     )
 
 def initialize_global_assessment_tools():
@@ -770,188 +1292,361 @@ def create_llm_driven_rag_tool() -> FunctionTool:
 
     def retrieve_with_llm_queries(
         body_region: str,
-        conversation_history: str
+        conversation_history: str,
+        rag_queries: Optional[List[str]] = None,
+        hyde_snippet: Optional[str] = None,
     ) -> str:
-        """Retrieve pain knowledge using LLM-generated queries and HyDE approach.
+        """Launch background RAG to refresh the pain questions queue (non-blocking).
 
         Args:
             body_region: Body region being assessed (e.g., "dos", "epaule")
             conversation_history: Summary of conversation so far
+            rag_queries: Optional list of semantic search queries generated by the agent
+            hyde_snippet: Optional HyDE-style snippet provided by the agent
 
         Returns:
-            JSON string with retrieved medical knowledge
+            JSON status string indicating that background retrieval was scheduled.
         """
-        print(f"🔥 LLM-DRIVEN RAG TOOL: retrieve_with_llm_queries called")
-        logger.warning(f"🔥 LLM-DRIVEN RAG TOOL: retrieve_with_llm_queries called for {body_region}")
-
-        from llama_index.llms.openai import OpenAI
-        import os
-
-        # Use GPT-4o-mini for fast query generation
-        llm = OpenAI(
-            model="gpt-4o-mini",
-            temperature=0.3,
-            api_key=os.getenv("OPENAI_API_KEY")
+        print("🔥 LLM-DRIVEN RAG TOOL: retrieve_with_llm_queries called (background launch)")
+        logger.warning(
+            "🔥 LLM-DRIVEN RAG TOOL: retrieve_with_llm_queries called for %s", body_region
         )
 
-        # Prompt LLM to generate queries
-        query_gen_prompt = f"""Given this pain assessment conversation history, generate 3-5 specific search queries to retrieve relevant medical knowledge from a pain assessment database.
+        candidate_queries: List[str] = []
+        if isinstance(rag_queries, str):
+            candidate_queries = [rag_queries]
+        elif isinstance(rag_queries, list):
+            candidate_queries = rag_queries
+        elif rag_queries is None:
+            candidate_queries = []
+        else:
+            raise ValueError(
+                "The 'rag_queries' parameter must be a list of agent-generated search strings."
+            )
 
-Body Region: {body_region}
-Conversation History: {conversation_history}
+        normalized_queries: List[str] = []
+        for query in candidate_queries:
+            if not isinstance(query, str):
+                continue
+            cleaned = query.strip()
+            if cleaned:
+                normalized_queries.append(cleaned)
 
-Generate queries that will help retrieve:
-1. Relevant clinical questions for this specific case to help diagnose the pain
-2. Information about the mechanism of injury/pain (how the pain/injury happened or started)
-3. Red flags or concerning symptoms 
-4. Potential causes/sources of the pain
-5. Focus on conversation history, do not ignore it , you can use it to generate queries
+        query_source = "agent"
+        if not normalized_queries:
+            fallback_query = (conversation_history or "").strip()
+            if fallback_query:
+                fallback_query = fallback_query[:400]
+                logger.warning(
+                    "No agent-generated queries supplied; using conversation history fallback for retrieval."
+                )
+                normalized_queries = [fallback_query]
+                query_source = "fallback_conversation"
+            else:
+                raise ValueError(
+                    "No valid agent-generated queries supplied to retrieve_with_llm_queries."
+                )
 
+        hyde_text = hyde_snippet.strip() if isinstance(hyde_snippet, str) else ""
+        user_id = _user_id_context.get()
 
-Also create a HyDE (Hypothetical Document Embedding) snippet - a 1-2 sentence summary of what medical document would answer this patient's case.
+        # Persist submitted queries immediately for observability
+        _store_queries_in_queue(
+            user_id=user_id,
+            body_region=body_region,
+            queries=normalized_queries,
+            hyde_snippet=hyde_text,
+            conversation_history=conversation_history,
+            source=query_source,
+        )
 
-Respond ONLY with valid JSON in this exact format:
-{{
-  "queries": [
-    "query 1 in French ",
-    "query 2 in French ",
-    "query 3 in French "
-  ],
-  "hyde_snippet": "Brief summary of patient case for semantic search"
-}}"""
+        retrieval_inputs = normalized_queries[:]
+        if hyde_text:
+            retrieval_inputs.append(hyde_text)
 
-        try:
-            # Generate queries with LLM
-            response = llm.complete(query_gen_prompt)
-            response_text = response.text.strip()
+        print(f"📝 Agent supplied {len(normalized_queries)} queries:")
+        for idx, query in enumerate(normalized_queries, 1):
+            print(f"   Query {idx}: {query}")
+        if hyde_text:
+            print(f"📝 Agent supplied HyDE snippet: {hyde_text}")
 
-            # Extract JSON from response (handle markdown code blocks)
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
-
-            query_data = json.loads(response_text)
-            queries = query_data.get("queries", [])
-            hyde_snippet = query_data.get("hyde_snippet", "")
-
-            print(f"📝 LLM Generated {len(queries)} queries:")
-            for i, q in enumerate(queries, 1):
-                print(f"   Query {i}: {q}")
-            print(f"📝 HyDE snippet: {hyde_snippet}")
-
-        except Exception as e:
-            logger.error(f"Failed to generate LLM queries: {e}")
-            # Fallback to simple queries
-            queries = [
-                f"{body_region} pain assessment",
-                f"{body_region} clinical evaluation",
-                f"douleur {body_region}"
-            ]
-            hyde_snippet = conversation_history[:200]
-
-        # Now retrieve with generated queries
-        retriever = get_enhanced_assessment_retriever()
-
-        # Build query structure for retrieval
-        all_results = []
-
-        # Add HyDE snippet as a query too
-        if hyde_snippet:
-            queries.append(hyde_snippet)
-
-        # Execute queries in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_query = {}
-            for query in queries[:5]:  # Max 5 queries
-                future = executor.submit(
-                    retriever._retrieve_with_query,
-                    query,
+        def _background_worker():
+            """Execute RAG in a separate thread and refresh the queue."""
+            try:
+                logger.info(
+                    "🚀 [retrieve_with_llm_queries] Background RAG started for user=%s region=%s",
+                    user_id,
                     body_region,
-                    ClinicalPriority.HIGH,
-                    top_k=3,
-                    search_for_questions=True,
-                    user_symptoms=conversation_history[:500],
-                    conversation_context=conversation_history[:200]
                 )
-                future_to_query[future] = query
 
-            # Collect results
-            for future in concurrent.futures.as_completed(future_to_query):
-                query = future_to_query[future]
-                try:
-                    results = future.result()
-                    all_results.extend(results)
-                    print(f"⚡ LLM-RAG: Completed query '{query[:50]}...' with {len(results)} results")
-                except Exception as e:
-                    logger.error(f"Error executing LLM-generated query: {e}")
+                retriever = get_enhanced_assessment_retriever()
 
-        # Consolidate results
-        consolidated_results = retriever._consolidate_results(all_results)
+                all_results: List[Dict[str, Any]] = []
+                if not retrieval_inputs:
+                    logger.warning("⚠️ No retrieval inputs available; background RAG skipped.")
+                    return
 
-        # Collect all extracted questions from the results
-        extracted_questions = _collect_all_questions(consolidated_results)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                    future_to_query = {}
+                    for query in retrieval_inputs[:5]:
+                        future = executor.submit(
+                            retriever._retrieve_with_query,
+                            query,
+                            body_region,
+                            ClinicalPriority.HIGH,
+                            top_k=3,
+                            search_for_questions=True,
+                            user_symptoms=conversation_history[:500],
+                            conversation_context=conversation_history[:200],
+                        )
+                        future_to_query[future] = query
 
-        # Format for AI
-        formatted_result = {
-            "llm_generated_queries": queries[:5],
-            "hyde_snippet": hyde_snippet,
+                    for future in concurrent.futures.as_completed(future_to_query):
+                        query = future_to_query[future]
+                        try:
+                            results = future.result()
+                            all_results.extend(results)
+                            print(
+                                f"⚡ LLM-RAG (background): Query '{query[:50]}...' returned {len(results)} results"
+                            )
+                        except Exception as exc:  # pragma: no cover - logging path
+                            logger.error(f"❌ Error executing agent-supplied query: {exc}")
 
-            # NEW: Explicit array of extracted questions from medical documents
-            "extracted_questions": extracted_questions,
-            "red_flag_examples": _collect_examples(consolidated_results, "red_flag_examples"),
-            "patient_statement_examples": _collect_examples(consolidated_results, "patient_statement_examples"),
+                if not all_results:
+                    logger.info(
+                        "ℹ️ [retrieve_with_llm_queries] No results retrieved for user=%s region=%s",
+                        user_id,
+                        body_region,
+                    )
+                    return
 
-            "medical_knowledge": [
-                {
-                    "content": doc["text"],
-                    "relevance_score": doc["score"],
-                    "priority": doc["priority"],
+                consolidated_results = retriever._consolidate_results(all_results)
+                extracted_questions = _collect_all_questions(consolidated_results)
+                question_texts = [q["question"] for q in extracted_questions if q.get("question")]
 
-                    # NEW: Include question metadata for transparency
-                    "has_questions": doc.get("has_questions", False),
-                    "question_count": doc.get("question_count", 0),
-                    "questions_in_chunk": doc.get("metadata", {}).get("assessment_questions", []),
-                    "red_flag_examples": doc.get("metadata", {}).get("red_flag_examples", []),
-                    "patient_statement_examples": doc.get("metadata", {}).get("patient_statement_examples", []),
-                }
-                for doc in consolidated_results[:10]
-            ],
-            "retrieval_method": "llm_driven_rag"
+                logger.info(
+                    "📚 [retrieve_with_llm_queries] Consolidated %d results, extracted %d questions",
+                    len(consolidated_results),
+                    len(question_texts),
+                )
+
+                if question_texts:
+                    add_questions_to_queue(
+                        user_id=user_id,
+                        body_region=body_region,
+                        questions=question_texts,
+                        conversation_history=conversation_history,
+                    )
+                    print(
+                        f"✅ Background RAG refreshed queue with {len(question_texts)} questions for user={user_id}"
+                    )
+                else:
+                    logger.info(
+                        "ℹ️ [retrieve_with_llm_queries] No new questions extracted for user=%s region=%s",
+                        user_id,
+                        body_region,
+                    )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(
+                    "❌ [retrieve_with_llm_queries] Background RAG failed for user=%s region=%s: %s",
+                    user_id,
+                    body_region,
+                    exc,
+                    exc_info=True,
+                )
+
+        thread_name = f"rag-bg-{_sanitize_for_key(user_id)}-{_sanitize_for_key(body_region)}"
+        threading.Thread(target=_background_worker, name=thread_name, daemon=True).start()
+
+        status_payload = {
+            "status": "background_rag_launched",
+            "body_region": body_region,
+            "queries_submitted": normalized_queries[:5],
+            "hyde_snippet_included": bool(hyde_text),
+            "message": (
+                "RAG refresh running in background. QUESTIONS will appear in AVAILABLE_QUESTIONS once ready."
+            ),
         }
-
-        print(f"✅ LLM-RAG: Retrieved {len(consolidated_results)} chunks using {len(queries)} LLM-generated queries")
-        print(f"🔍 EXTRACTED: {len(extracted_questions)} questions from medical documents")
-
-        # Show top extracted questions in logs
-        if extracted_questions:
-            print(f"📋 TOP EXTRACTED QUESTIONS:")
-            for i, q in enumerate(extracted_questions[:5], 1):
-                print(f"   {i}. [{q['priority']}] {q['question'][:100]}...")
-
-            print("📚 ALL EXTRACTED QUESTIONS:")
-            for idx, q in enumerate(extracted_questions, 1):
-                question_preview = q['question'].replace('\n', ' ')[:160]
-                print(
-                    f"   {idx}. priority={q['priority']} score={q['relevance_score']:.4f} "
-                    f"question={question_preview}"
-                )
-
-        return json.dumps(formatted_result, indent=2)
+        return json.dumps(status_payload, ensure_ascii=False, indent=2)
 
     return FunctionTool.from_defaults(
         fn=retrieve_with_llm_queries,
         name="retrieve_with_llm_queries",
-        description="Retrieve pain assessment knowledge using LLM-generated queries tailored to the specific conversation context. More adaptive than fixed query templates."
+        description=(
+            "Launch a background RAG refresh using agent-generated semantic queries "
+            "and an optional HyDE snippet tailored to the current conversation."
+        )
     )
 
 
-def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:
-    """Get tools for AI-powered pain assessment with LLM-driven RAG."""
-    from app.tools.date_tool import get_date_tool
+def create_queue_management_tools() -> List[FunctionTool]:
+    """Create tools for managing the questions queue."""
+
+    def add_questions_to_my_queue(
+        body_region: str,
+        questions: List[str],
+    ) -> str:
+        """Add extracted questions to your assessment queue.
+
+        Call this IMMEDIATELY after receiving RAG results to store the top 3-4 questions.
+        The queue automatically filters out duplicates and questions already asked.
+
+        Args:
+            body_region: Body region being assessed (e.g., "dos", "genou")
+            questions: List of 3-4 best questions to add to queue
+
+        Returns:
+            Status message confirming questions were added
+        """
+        user_id = _user_id_context.get()
+
+        # Get conversation history from context if available
+        conversation_history = ""
+
+        logger.info(f"🔧 [Tool] add_questions_to_my_queue called for user={user_id} region={body_region}")
+        print(f"🔧 [Tool] Adding {len(questions)} questions to queue for user={user_id}")
+
+        add_questions_to_queue(user_id, body_region, questions, conversation_history)
+
+        return f"Successfully added {len(questions)} questions to your queue. Queue ready for next assessment turn."
+
+    def get_next_question() -> str:
+        """Get the next unasked question from your queue.
+
+        Call this when you're ready to ask the user a question from your queue.
+        Returns the next question or indicates if queue is empty.
+
+        Returns:
+            Next question string or empty queue indicator
+        """
+        user_id = _user_id_context.get()
+
+        # Try to infer body region from recent context (simplified)
+        # In production, you'd pass this as a parameter or store it in context
+        body_region = "general"  # Default fallback
+
+        logger.info(f"🔧 [Tool] get_next_question called for user={user_id}")
+
+        question = get_next_question_from_queue(user_id, body_region)
+
+        if question:
+            return f"NEXT_QUESTION: {question}"
+        else:
+            return "QUEUE_EMPTY: No more questions in queue. Consider calling RAG again if assessment incomplete."
+
+    def mark_current_question_asked(
+        body_region: str,
+        question_text: str,
+    ) -> str:
+        """Mark a question as asked after the user responds.
+
+        Call this IMMEDIATELY after asking a question from your queue and receiving the user's answer.
+        The agent is responsible for tracking conversational turns and deciding when to refresh the queue.
+
+        Args:
+            body_region: Body region being assessed
+            question_text: The exact question you just asked
+
+        Returns:
+            Status message confirming the update
+        """
+        user_id = _user_id_context.get()
+
+        logger.info(f"🔧 [Tool] mark_current_question_asked called for user={user_id}")
+
+        success = mark_question_as_asked(user_id, body_region, question_text)
+
+        if success:
+            return (
+                "Question marked as asked. Keep track of your exchanges and trigger "
+                "retrieve_with_llm_queries after roughly two turns so the queue stays fresh."
+            )
+        else:
+            return (
+                "Unable to mark question as asked. Ensure the exact question text matches "
+                "what was stored in the queue."
+            )
+
+    def clear_my_queue(body_region: str) -> str:
+        """Clear your questions queue before adding new questions from fresh RAG results.
+
+        Call this AFTER triggering a new RAG call and BEFORE adding new questions.
+
+        Args:
+            body_region: Body region being assessed
+
+        Returns:
+            Confirmation message
+        """
+        user_id = _user_id_context.get()
+
+        logger.info(f"🔧 [Tool] clear_my_queue called for user={user_id} region={body_region}")
+
+        clear_questions_queue(user_id, body_region)
+
+        return f"Queue cleared for user={user_id}. Ready to add new questions from RAG."
+
+    def check_queue_status(body_region: str) -> str:
+        """Check current queue status (for debugging).
+
+        Args:
+            body_region: Body region being assessed
+
+        Returns:
+            Queue status with counts
+        """
+        user_id = _user_id_context.get()
+
+        state = get_full_queue_state(user_id, body_region)
+
+        return json.dumps(state, indent=2)
 
     return [
+        FunctionTool.from_defaults(
+            fn=add_questions_to_my_queue,
+            name="add_questions_to_my_queue",
+            description=(
+                "Add 3-4 best questions from RAG results to your queue. "
+                "Call immediately after retrieve_with_llm_queries returns. "
+                "Automatically filters duplicates."
+            )
+        ),
+        FunctionTool.from_defaults(
+            fn=mark_current_question_asked,
+            name="mark_current_question_asked",
+            description=(
+                "Mark question as asked after user responds. "
+                "You (the agent) are responsible for triggering RAG—aim for every ~2 exchanges to keep the queue stocked."
+            )
+        ),
+        FunctionTool.from_defaults(
+            fn=clear_my_queue,
+            name="clear_my_queue",
+            description=(
+                "Clear queue before adding new questions from fresh RAG. "
+                "Call after triggering RAG, before add_questions_to_my_queue."
+            )
+        ),
+        FunctionTool.from_defaults(
+            fn=check_queue_status,
+            name="check_queue_status",
+            description="Check current queue status for debugging."
+        ),
+    ]
+
+
+def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:
+    """Get tools for AI-powered pain assessment with LLM-driven RAG (queue tools removed for mental queue approach)."""
+    from app.tools.date_tool import get_date_tool
+
+    tools = [
         create_llm_driven_rag_tool(),
         create_pain_summary_generator_tool(),
+        create_pain_session_exit_tool(),
         get_date_tool()
     ]
+
+    # Queue management tools removed - agent now uses mental queue based on conversation history
+    # The agent generates rag_queries autonomously and manages question selection via history
+
+    return tools

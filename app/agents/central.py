@@ -10,9 +10,22 @@ import os
 from llama_index.core.agent.workflow import AgentWorkflow, FunctionAgent
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.tools import FunctionTool
+from app.core.config import ROUTER_MODEL, DEFAULT_MODEL
 
 
 logger = logging.getLogger(__name__)
+
+
+# Global OpenAI client (reused across requests for connection pooling)
+_OPENAI_CLIENT = None
+
+def get_openai_client():
+    """Get or create global AsyncOpenAI client for connection reuse."""
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        from openai import AsyncOpenAI
+        _OPENAI_CLIENT = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _OPENAI_CLIENT
 
 
 _DESCRIPTION = (
@@ -411,8 +424,9 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                 if self._current_agent != agent_before_execution:
                     logger.info(f"🤝 STREAMING Handoff detected! Switching from {agent_before_execution} to {self._current_agent}")
 
-                    # Continue with the new agent - use appropriate message based on agent type
-                    user_msg = self._router_message if self._current_agent == "CentralRouterAgent" else self._agent_message
+                    # Continue to next iteration - specialist agent will stream in else block
+                    # Update user message for specialist
+                    user_msg = self._agent_message
                     continue
                 else:
                     # Router completed without handoff - shouldn't happen but handle it
@@ -421,213 +435,177 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                     return
 
             else:
-                logger.info(f"🎯 Specialist agent execution - WITH STREAMING for {self._current_agent}")
+                logger.info(f"🎯 Specialist agent execution - REAL STREAMING for {self._current_agent}")
 
-                # TEMPORARY: Check if this is the Pain Assessment Agent (needs tool calls)
-                if self._current_agent == "EnhancedPainAssessmentAgent":
-                    logger.info("🔧 Pain Assessment Agent detected - enabling final-response streaming after tool execution")
-
-                    # For Pain Assessment Agent, perform tool-enabled execution first (non-streaming),
-                    # then stream ONLY the final, user-visible message.
-                    original_root = self.root_agent
-                    self.root_agent = self._current_agent
-
-                    try:
-                        # Run with tools to completion (non-streaming)
-                        # CRITICAL: include full agent context as memory so the specialist
-                        # can see the prior turns (prevents repeated questions like
-                        # re-asking the body region when it was given earlier).
-                        # FORCE tool calling for pain agent to ensure RAG retrieval
-                        tool_choice_param = {"tool_choice": "auto"}  # Force at least one tool call
-                        if getattr(self, "_agent_context_array", None):
-                            try:
-                                from llama_index.core.memory import ChatMemoryBuffer
-                                from llama_index.core.llms import ChatMessage
-                                memory = ChatMemoryBuffer.from_defaults()
-                                for msg in self._agent_context_array[:-1]:  # All except last user msg
-                                    chat_msg = ChatMessage(role=msg.get("role", "user"), content=msg.get("content", ""))
-                                    memory.put(chat_msg)
-                                result = await super().run(user_msg=user_msg, memory=memory, **tool_choice_param, **kwargs)
-                            except asyncio.CancelledError:
-                                logger.warning("⚠️ Pain agent execution cancelled by client disconnect")
-                                raise  # Re-raise to properly handle cancellation
-                            except Exception as e:
-                                # Fallback if memory construction fails
-                                logger.warning(f"⚠️ Memory construction failed: {e}, falling back to basic execution")
-                                result = await super().run(user_msg=user_msg, **tool_choice_param, **kwargs)
-                        else:
-                            result = await super().run(user_msg=user_msg, **tool_choice_param, **kwargs)
-
-                        # Extract final text in a robust way
-                        final_text = str(result.response if hasattr(result, 'response') else result)
-                        final_text = final_text or ""
-
-                        # Strip "assistant:" prefix if present (FunctionAgent sometimes includes role prefix)
-                        if final_text.startswith("assistant:"):
-                            final_text = final_text[len("assistant:"):].strip()
-
-                        # Try true streaming via the underlying LLM for the final response
-                        # If anything goes wrong, fall back to safe chunked streaming.
-                        streamed = False
-                        try:
-                            from openai import AsyncOpenAI
-
-                            current_agent_config = self.agents[self._current_agent]
-                            agent_instance = current_agent_config
-
-                            if final_text:
-                                logger.info("🌊 Streaming final pain-agent response via OpenAI native streaming")
-                                async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                                model_name = getattr(getattr(agent_instance, "llm", None), "model", "gpt-4o-mini")
-                                openai_messages = [
-                                    {
-                                        "role": "system",
-                                        "content": (
-                                            "Répète EXACTEMENT le texte du message utilisateur, sans guillemets, "
-                                            "sans ajout ni omission, en respectant les sauts de ligne et l'espacement."
-                                        ),
-                                    },
-                                    {"role": "user", "content": final_text},
-                                ]
-
-                                try:
-                                    stream = await async_client.chat.completions.create(
-                                        model=model_name,
-                                        messages=openai_messages,
-                                        stream=True,
-                                    )
-                                    async for event in stream:
-                                        try:
-                                            delta = event.choices[0].delta
-                                            chunk = getattr(delta, "content", None) or ""
-                                        except Exception:
-                                            chunk = ""
-                                        if chunk:
-                                            yield chunk
-                                    streamed = True
-                                except asyncio.CancelledError:
-                                    logger.warning("⚠️ Streaming cancelled by client disconnect")
-                                    raise  # Re-raise to properly handle cancellation
-                                except Exception as stream_err:
-                                    logger.warning(
-                                        f"⚠️ Final-response OpenAI streaming failed: {stream_err}"
-                                    )
-                        except Exception as stream_err:  # pragma: no cover - defensive fallback
-                            logger.warning(
-                                f"⚠️ Final-response LLM streaming failed, falling back to chunked streaming: {stream_err}"
-                            )
-
-                        if not streamed:
-                            # Do not simulate streaming; delegate to API layer fallback
-                            logger.info("⛔ Skipping simulated streaming for pain-agent; delegating to API fallback")
-                            return
-
-                    finally:
-                        # Always restore original root agent
-                        self.root_agent = original_root
-
-                    # Pain agent turn completed
-                    return
-
-                # For other specialist agents, use direct LLM streaming
-                logger.info(f"🎯 Regular specialist agent execution - WITH STREAMING for {self._current_agent}")
-
-                # CRITICAL FIX: Set the workflow's current agent for parent class
+                # Real streaming with tool support via OpenAI SDK
                 original_root = self.root_agent
                 self.root_agent = self._current_agent
 
                 try:
-                    # Execute specialist agent with streaming support via direct LLM access
+                    from openai import AsyncOpenAI
+                    import json as json_lib
+
+                    # Build message history
+                    messages = []
+
+                    # Add system prompt
                     current_agent_config = self.agents[self._current_agent]
                     agent_instance = current_agent_config
+                    system_prompt = getattr(agent_instance, 'system_prompt', None)
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
 
-                    stream_success = False
-                    stream_error: Exception | None = None
+                    # Add conversation history
+                    if getattr(self, "_agent_context_array", None):
+                        for msg in self._agent_context_array[:-1]:
+                            messages.append({
+                                "role": msg.get("role", "user"),
+                                "content": msg.get("content", "")
+                            })
 
-                    try:
-                        # Build message array for streaming if available; fallback to single user message
-                        messages_for_stream = None
-                        if getattr(self, "_agent_context_array", None):
-                            try:
-                                from llama_index.core.llms import ChatMessage
-                                messages_for_stream = [
-                                    ChatMessage(role=m.get("role", "user"), content=m.get("content", ""))
-                                    for m in self._agent_context_array
-                                ]
-                            except Exception:
-                                # Fallback: pass through the raw dicts (some clients accept dict format)
-                                messages_for_stream = list(self._agent_context_array)
-                        else:
-                            # Minimal message array
-                            try:
-                                from llama_index.core.llms import ChatMessage
-                                messages_for_stream = [ChatMessage(role="user", content=user_msg)]
-                            except Exception:
-                                messages_for_stream = [{"role": "user", "content": user_msg}]
+                    # Add current user message
+                    messages.append({"role": "user", "content": user_msg})
 
-                        logger.info(f"🌊 Using OpenAI native streaming for {self._current_agent}")
-                        try:
-                            from openai import AsyncOpenAI
+                    # Convert tools to OpenAI format
+                    agent_tools = getattr(agent_instance, 'tools', None) or []
+                    openai_tools = []
+                    tool_map = {}  # Map tool names to actual tool functions
 
-                            # Convert message array to OpenAI format
-                            openai_messages: list[dict] = []
-                            for m in (messages_for_stream or [{"role": "user", "content": user_msg}]):
-                                if hasattr(m, "role") and hasattr(m, "content"):
-                                    openai_messages.append({"role": m.role, "content": m.content})
-                                elif isinstance(m, dict):
-                                    openai_messages.append({
-                                        "role": m.get("role", "user"),
-                                        "content": m.get("content", ""),
-                                    })
-
-                            # CRITICAL: Extract and prepend agent's system prompt
-                            agent_system_prompt = getattr(agent_instance, 'system_prompt', None)
-                            if agent_system_prompt:
-                                openai_messages.insert(0, {"role": "system", "content": agent_system_prompt})
-                                logger.info(f"✅ Injected system prompt for {self._current_agent}")
+                    for tool in agent_tools:
+                        if hasattr(tool, 'metadata'):
+                            tool_map[tool.metadata.name] = tool
+                            # Use LlamaIndex's built-in OpenAI conversion
+                            if hasattr(tool.metadata, 'to_openai_tool'):
+                                tool_def = tool.metadata.to_openai_tool()
                             else:
-                                logger.warning(f"⚠️ No system prompt found for {self._current_agent}")
+                                # Fallback to manual construction
+                                tool_def = {
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool.metadata.name,
+                                        "description": tool.metadata.description or "",
+                                        "parameters": tool.metadata.get_parameters_dict() if hasattr(tool.metadata, 'get_parameters_dict') else {}
+                                    }
+                                }
+                            openai_tools.append(tool_def)
 
-                            async_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                            model_name = getattr(getattr(agent_instance, "llm", None), "model", "gpt-4o-mini")
-                            stream = await async_client.chat.completions.create(
-                                model=model_name,
-                                messages=openai_messages,
-                                stream=True,
-                            )
-                            async for event in stream:
-                                try:
-                                    delta = event.choices[0].delta
-                                    chunk = getattr(delta, "content", None) or ""
-                                except Exception:
-                                    chunk = ""
-                                if chunk:
-                                    yield chunk
-                            stream_success = True
-                        except Exception as err:  # pragma: no cover - streaming path
-                            stream_error = err
-                            logger.warning(
-                                f"⚠️ OpenAI native streaming failed for {self._current_agent}, falling back: {err}"
-                            )
-                    except Exception as err:  # pragma: no cover - streaming path
-                        stream_error = err
-                        logger.warning(
-                            f"⚠️ Streaming failed for {self._current_agent}, falling back to regular execution: {err}"
+                    logger.info(f"🌊 Real streaming for {self._current_agent} with {len(openai_tools)} tools")
+
+                    # Execute streaming with tool support (reuse global client)
+                    client = get_openai_client()
+                    model = getattr(getattr(agent_instance, "llm", None), "model", DEFAULT_MODEL)
+
+                    # Loop to handle multiple tool calls
+                    max_iterations = 10
+                    for iteration in range(max_iterations):
+                        stream = await client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            tools=openai_tools if openai_tools else None,
+                            stream=True,
                         )
 
-                    if not stream_success:
-                        if stream_error:
-                            logger.debug(f"Streaming error detail: {stream_error}")
-                        # Do not simulate streaming; delegate to API layer fallback
-                        logger.info("⛔ Skipping simulated streaming for specialist agent; delegating to API fallback")
-                        return
+                        # Accumulate response and tool calls
+                        content_chunks = []
+                        tool_calls = {}
+                        finish_reason = None
+
+                        async for chunk in stream:
+                            if not chunk.choices:
+                                continue
+
+                            delta = chunk.choices[0].delta
+                            finish_reason = chunk.choices[0].finish_reason
+
+                            # Stream text content to user
+                            if delta.content:
+                                content_chunks.append(delta.content)
+                                yield delta.content
+
+                            # Accumulate tool calls
+                            if delta.tool_calls:
+                                for tc in delta.tool_calls:
+                                    idx = tc.index
+                                    if idx not in tool_calls:
+                                        tool_calls[idx] = {
+                                            "id": "",
+                                            "name": "",
+                                            "arguments": ""
+                                        }
+                                    if tc.id:
+                                        tool_calls[idx]["id"] = tc.id
+                                    if tc.function and tc.function.name:
+                                        tool_calls[idx]["name"] = tc.function.name
+                                    if tc.function and tc.function.arguments:
+                                        tool_calls[idx]["arguments"] += tc.function.arguments
+
+                        # If no tool calls, we're done
+                        if finish_reason == "stop" or not tool_calls:
+                            break
+
+                        # Execute tool calls
+                        if finish_reason == "tool_calls":
+                            logger.info(f"🔧 Executing {len(tool_calls)} tool calls")
+
+                            # Add assistant message with tool calls to history
+                            full_content = "".join(content_chunks)
+                            assistant_msg = {"role": "assistant", "content": full_content or None}
+
+                            # Add tool call info
+                            assistant_msg["tool_calls"] = []
+                            for tc_data in tool_calls.values():
+                                assistant_msg["tool_calls"].append({
+                                    "id": tc_data["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc_data["name"],
+                                        "arguments": tc_data["arguments"]
+                                    }
+                                })
+                            messages.append(assistant_msg)
+
+                            # Execute each tool and add results
+                            for tc_data in tool_calls.values():
+                                tool_name = tc_data["name"]
+                                tool_args_str = tc_data["arguments"]
+
+                                try:
+                                    tool_args = json_lib.loads(tool_args_str)
+                                    tool_fn = tool_map.get(tool_name)
+
+                                    if tool_fn:
+                                        logger.info(f"⚙️ Calling tool: {tool_name}")
+                                        result = tool_fn(**tool_args)
+                                        tool_result = str(result)
+                                    else:
+                                        tool_result = f"Error: Unknown tool {tool_name}"
+                                        logger.error(f"❌ Unknown tool: {tool_name}")
+
+                                    # Add tool result to messages
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tc_data["id"],
+                                        "content": tool_result
+                                    })
+
+                                except Exception as e:
+                                    logger.error(f"❌ Tool execution failed: {e}")
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tc_data["id"],
+                                        "content": f"Error: {str(e)}"
+                                    })
+
+                            # Continue to next iteration to get final response
+                            continue
+
+                        # Unknown finish reason
+                        break
 
                 finally:
-                    # Restore original root agent
                     self.root_agent = original_root
 
-                # Specialist agent completed
-                logger.info(f"✅ STREAMING Specialist agent {self._current_agent} completed processing")
+                logger.info(f"✅ REAL STREAMING completed for {self._current_agent}")
                 return
 
         logger.warning(f"⚠️ STREAMING Max iterations reached ({max_iterations})")
@@ -643,7 +621,7 @@ def build_workflow(
     """
     # Use fast, cheap model for router (routing is simple decision-making)
     from llama_index.llms.openai import OpenAI
-    router_llm = OpenAI(model="gpt-4o-mini", temperature=0.3)
+    router_llm = OpenAI(model=ROUTER_MODEL, temperature=0.3)
 
     central_router = build_router(router_llm)
     all_agents = [central_router] + list(specialist_agents)
@@ -654,5 +632,5 @@ def build_workflow(
         initial_state=initial_state or {},
     )
 
-    logger.info("🤖 Workflow initialized with fast router (gpt-4o-mini) and specialists")
+    logger.info("🤖 Workflow initialized with fast router (%s) and specialists", ROUTER_MODEL)
     return workflow

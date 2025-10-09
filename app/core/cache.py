@@ -37,7 +37,6 @@ def _pain_msgs_key(user_id: str) -> str:
 def _pain_active_key(user_id: str) -> str:
     return f"pain:active:{user_id}"
 
-
 # --- Conversation history ---
 async def get_conversation_history(user_id: str, limit: int = 3) -> List[Dict[str, str]]:
     try:
@@ -137,4 +136,3 @@ async def is_pain_agent_session_active(user_id: str) -> bool:
         return (await r.get(_pain_active_key(user_id))) == "1"
     except Exception:
         return False
-

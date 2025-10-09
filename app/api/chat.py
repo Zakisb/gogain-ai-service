@@ -15,14 +15,6 @@ from app.agents.central import build_workflow
 from app.core.memory import get_mem0_client
 from app.core.config import DEFAULT_MODEL
 from app.tools.date_tool import current_datetime_context_line
-from app.api.types import (
-    StreamingEvent,
-    create_status_event,
-    create_token_event,
-    create_done_event,
-    create_error_event,
-)
-from llama_index.core.memory import Memory
 from app.core.cache import (
     get_conversation_history as cache_get_conversation_history,
     add_conversation_message as cache_add_conversation_message,
@@ -48,12 +40,8 @@ _CACHED_AGENTS = {
 _AGENT_CACHE_LOCK = asyncio.Lock()
 
 
-# Per-request workflows only; remove shared global caches to avoid cross-user leakage
-
-# Request/Response models
-class ChatRequest(BaseModel):
-    message: str
-    user_id: str = "test_user_01"  # Default for development
+# NOTE: Workflow is NOT cached because it has mutable instance state (_current_agent, _user_id, etc)
+# that would cause race conditions between concurrent users. Only agents are cached.
 
 # Create API Router
 router = APIRouter(prefix="/chat")
@@ -193,10 +181,10 @@ async def build_pain_agent_context(user_id: str, current_message: str, user_memo
 
 
 async def warmup_agents(llm):
-    """Build and cache essential agents at startup (Pain, Training, QA only).
+    """Build and cache essential agents at startup.
 
     This eliminates the 20-second first-request delay by pre-building agents.
-    Safe for multi-user: agents are stateless, user context comes from messages.
+    Workflow is NOT cached (has mutable state, must be per-request for multi-user safety).
     """
     async with _AGENT_CACHE_LOCK:
         logger.info("🔥 Building essential agents for cache...")
@@ -211,7 +199,7 @@ async def warmup_agents(llm):
         _CACHED_AGENTS["training"] = build_training(llm)
         _CACHED_AGENTS["qa"] = build_qa(llm)
 
-        logger.info("✅ Cached 3 essential agents (Pain, Training, QA)")
+        logger.info("✅ Cached 3 essential agents (Pain, Training, QA - multi-user safe)")
 
 
 def get_cached_or_build_agents(llm):
@@ -241,312 +229,22 @@ def get_cached_or_build_agents(llm):
 
 
 def get_or_build_workflow(llm):
-    """Return a fresh workflow instance per request using cached agents.
+    """Build workflow instance per-request (uses cached agents).
 
-    Workflow wrapper is lightweight (just orchestration), built per-request.
-    Agents are reused from cache (safe: stateless, context via messages).
+    Workflow has mutable state (_current_agent, _user_id, etc) so must be created
+    per-request to avoid race conditions between concurrent users.
+
+    Agents are cached globally (safe: they're stateless).
     """
-    logger.info("🏗️ Building workflow with cached agents")
     specialist_agents = get_cached_or_build_agents(llm)
     workflow = build_workflow(
         llm,
         specialist_agents,
         initial_state={}
     )
+    logger.info("🏗️ Built workflow for request (using cached agents)")
     return workflow
 
-
-def emit_event(event: StreamingEvent) -> str:
-    """Helper function to emit a typed streaming event as Server-Sent Event format."""
-    return f"data: {event.model_dump_json()}\n\n"
-
-@router.post("")
-async def handle_chat(request: ChatRequest) -> StreamingResponse:
-    """
-    Streaming chat endpoint with session persistence for context and memory.
-    Always returns Server-Sent Events for real-time response streaming.
-    
-    Returns:
-        StreamingResponse: Server-Sent Events containing typed StreamingEvent objects
-        
-    Event Types:
-        - StartEvent: Initialization
-        - StatusEvent: Processing status updates  
-        - AgentStartEvent: Agent transitions
-        - TokenEvent: Real-time text streaming
-        - ToolCallsEvent: Tool usage notifications
-        - ToolStartEvent: Individual tool start
-        - ToolResultEvent: Individual tool completion
-        - CompleteEvent: Final response with complete text
-        - DoneEvent: Stream completion
-        - ErrorEvent: Error information
-    """
-    
-    async def stream_generator():
-        try:
-            logger.info(f"Starting streaming chat for user {request.user_id}: {request.message}")
-            print(f"Request: {request.user_id}")
-            
-            # Initialize LLM - direct OpenAI wrapper for reliable tool support
-            # Note: GPT-5 only supports temperature=1 (default), other models support custom values
-            temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.7
-            llm = OpenAI(model=DEFAULT_MODEL, temperature=temp)
-            
-            # Initialize Mem0 and retrieve user memories FIRST - DISABLED
-            # yield emit_event(create_status_event("Memory system: Mem0 AI"))
-
-            # Retrieve relevant memories from Mem0 for personalization - DISABLED FOR PERFORMANCE
-            user_memories = []
-            # Mem0 memory retrieval completely disabled for speed testing
-            yield emit_event(create_status_event("Mem0 disabled - using conversation history only"))
-
-            # Build fresh workflow per request to avoid cross-user state contamination
-            workflow = get_or_build_workflow(llm)
-            
-            # Get conversation history from cache (fast) or OpenAI Threads (fallback)
-            # Extended history for better context understanding
-            history = await get_cached_conversation_history(request.user_id, limit=10)
-
-            # Add user message to local cache immediately (fast)
-            await add_to_conversation_cache(request.user_id, request.message, "user")
-
-
-            # Emit status about loaded messages
-            if history:
-                yield emit_event(create_status_event(f"Loaded {len(history)} messages using message array format"))
-            else:
-                yield emit_event(create_status_event("Starting new conversation"))
-
-            # Build contextual messages for router (3 messages) and agents (40 messages)
-            # Router needs minimal context - just enough to detect ongoing flows
-            routing_messages = build_message_array_context(
-                history=history[-2:] if len(history) > 2 else history,  # Last 2 + current = 3 total
-                current_message=request.message,
-                user_memories=user_memories,
-                limit=3,  # 3 messages for router context (optimized for speed)
-                include_memories=False  # Memories disabled for performance
-            )
-
-            # Inject current user_id so tools receive the correct identifier
-            routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {request.user_id}"})
-            # Temporal context (commented to avoid changing current workflow)
-            # routing_messages.insert(0, {"role": "system", "content": current_datetime_context_line()})
-
-            # Build full context for agents (40 messages)
-            agent_messages = build_message_array_context(
-                history=history,
-                current_message=request.message,
-                user_memories=user_memories,
-                limit=40,  # Expanded 40 message history for agents to prevent question repetition
-                include_memories=False  # Memories disabled for performance
-            )
-
-            # Inject current user_id for agents as well
-            agent_messages.insert(0, {"role": "system", "content": f"Current user_id: {request.user_id}"})
-            # Temporal context (commented to avoid changing current workflow)
-            # agent_messages.insert(0, {"role": "system", "content": current_datetime_context_line()})
-
-            # Message arrays are passed directly to workflow instead of converting to strings
-            # This fixes the Pydantic validation error where strings were sent to OpenAI's messages field
-
-            # Router gets current message only for routing decision (but with 5 message context)
-            # This preserves the "last message decides routing" behavior
-            routing_message = request.message
-
-            # Run workflow with conversation-aware message
-            logger.info(f"🚀 Starting workflow execution for user: {request.user_id}")
-            logger.info(f"📝 Message being processed: '{request.message[:100]}{'...' if len(request.message) > 100 else ''}'")
-
-            final_response_content = "No response generated."
-
-            async def run_without_streaming() -> str:
-                """Execute the workflow without streaming and return the final response text."""
-                nonlocal final_response_content
-
-                logger.info("📦 Falling back to regular workflow execution (no streaming)")
-                logger.info(f"🎯 Router context: '{routing_message[:100]}{'...' if len(routing_message) > 100 else ''}'")
-                logger.info(f"🔄 Router has {len(routing_messages)} messages for context")
-                logger.info(f"🤖 Agent context messages: {len(agent_messages)}")
-
-                if hasattr(workflow, 'run'):
-                    logger.info("🔄 Executing workflow.run()")
-                    result = await workflow.run(
-                        user_msg=routing_message,
-                        router_context=routing_messages,
-                        agent_context=agent_messages
-                    )
-                elif hasattr(workflow, 'arun'):
-                    logger.info("🔄 Executing workflow.arun()")
-                    result = await workflow.arun(
-                        user_msg=routing_message,
-                        router_context=routing_messages,
-                        agent_context=agent_messages
-                    )
-                else:
-                    raise Exception("No suitable execution method found on EnhancedAgentWorkflow")
-
-                logger.info(f"🎭 Workflow result type: {type(result)}")
-                if hasattr(result, 'response'):
-                    final_response_content = str(result.response).strip()
-                    logger.info("📤 Response extracted from result.response")
-                elif isinstance(result, str):
-                    final_response_content = result.strip()
-                    logger.info("📤 Response is direct string")
-                else:
-                    final_response_content = str(result).strip()
-                    logger.info("📤 Response converted from object")
-
-                response_preview = final_response_content[:150] + "..." if len(final_response_content) > 150 else final_response_content
-                logger.info(f"📝 Generated response preview: '{response_preview}'")
-
-                if final_response_content.startswith("assistant: "):
-                    final_response_content = final_response_content[len("assistant: "):].strip()
-                elif final_response_content.startswith("assistant:"):
-                    final_response_content = final_response_content[len("assistant:"):].strip()
-                elif final_response_content.startswith("assistant:\n"):
-                    final_response_content = final_response_content[len("assistant:\n"):].strip()
-
-                if not final_response_content or final_response_content == "No response generated.":
-                    final_response_content = "I apologize, but I couldn't generate a response. Please try again."
-
-                return final_response_content
-
-            try:
-                # Execute EnhancedAgentWorkflow WITH STREAMING SUPPORT
-                logger.info("🎯 Starting EnhancedAgentWorkflow execution...")
-                logger.info(f"🔗 Workflow root agent: {getattr(workflow, 'root_agent', 'CentralRouterAgent')}")
-
-                if hasattr(workflow, 'run_with_streaming'):
-                    logger.info("🌊 Executing workflow with streaming support")
-                    logger.info(f"🎯 Router context: '{routing_message[:100]}{'...' if len(routing_message) > 100 else ''}'")
-                    logger.info(f"🤖 Agent context messages: {len(agent_messages)}")
-
-                    def coerce_chunk_to_text(chunk) -> str:
-                        """Normalize streaming chunks from various providers into plain text."""
-                        if chunk is None:
-                            return ""
-                        if isinstance(chunk, str):
-                            return chunk
-                        if isinstance(chunk, (list, tuple)):
-                            return "".join(coerce_chunk_to_text(item) for item in chunk)
-                        if isinstance(chunk, dict):
-                            if 'content' in chunk:
-                                return coerce_chunk_to_text(chunk['content'])
-                            if 'delta' in chunk:
-                                return coerce_chunk_to_text(chunk['delta'])
-                            if 'text' in chunk:
-                                return coerce_chunk_to_text(chunk['text'])
-                            return ""
-                        text_attr = getattr(chunk, 'text', None)
-                        if text_attr is not None:
-                            return coerce_chunk_to_text(text_attr)
-                        content_attr = getattr(chunk, 'content', None)
-                        if content_attr is not None:
-                            return coerce_chunk_to_text(content_attr)
-                        delta_attr = getattr(chunk, 'delta', None)
-                        if delta_attr is not None:
-                            return coerce_chunk_to_text(delta_attr)
-                        return str(chunk)
-
-                    collected_response = ""
-                    streamed_any_tokens = False
-                    streaming_error = None
-
-                    try:
-                        async for response_chunk in workflow.run_with_streaming(
-                            user_msg=routing_message,
-                            router_context=routing_messages,
-                            agent_context=agent_messages
-                        ):
-                            raw_text = coerce_chunk_to_text(response_chunk)
-                            if not raw_text:
-                                continue
-
-                            chunk_text = raw_text.replace("\r", "")
-
-                            if chunk_text.startswith("assistant: "):
-                                chunk_text = chunk_text[len("assistant: "):].lstrip()
-                            elif chunk_text.startswith("assistant:\n"):
-                                chunk_text = chunk_text[len("assistant:\n"):].lstrip()
-                            elif chunk_text.startswith("assistant:"):
-                                chunk_text = chunk_text[len("assistant:"):].lstrip()
-
-                            if chunk_text == "":
-                                continue
-
-                            streamed_any_tokens = True
-                            collected_response += chunk_text
-                            yield emit_event(create_token_event(chunk_text)) + "\n\n"  # Extra padding for Docker flushing
-                            # Force immediate flush
-                            await asyncio.sleep(0)
-                    except Exception as stream_error:
-                        streaming_error = stream_error
-                        logger.warning(
-                            f"⚠️ Streaming execution failed, will attempt fallback: {stream_error}",
-                            exc_info=True,
-                        )
-
-                    if streamed_any_tokens and not streaming_error:
-                        final_response_content = collected_response
-                        if not final_response_content:
-                            final_response_content = "No response generated."
-                    else:
-                        reason = "no tokens produced" if not streaming_error else "exception during streaming"
-                        logger.info(f"📦 Triggering fallback because streaming resulted in {reason}")
-                        fallback_response = await run_without_streaming()
-                        yield emit_event(create_token_event(fallback_response))
-                        final_response_content = fallback_response
-                else:
-                    fallback_response = await run_without_streaming()
-                    yield emit_event(create_token_event(fallback_response))
-                    final_response_content = fallback_response
-
-            except Exception as e:
-                logger.error(f"❌ Workflow execution failed: {e}")
-                final_response_content = f"I encountered an error while processing your request. Please try again."
-                yield emit_event(create_token_event(final_response_content))
-            
-            # Save assistant response to cache asynchronously (don't block stream end)
-            if final_response_content and final_response_content != "No response generated.":
-                # Add assistant message to local cache immediately (fast)
-                await add_to_conversation_cache(request.user_id, final_response_content, "assistant")
-
-            
-            # Store user message in Mem0 vector database - DISABLED FOR PERFORMANCE TESTING
-            # Making this async to not block response streaming
-            # try:
-            #     asyncio.create_task(
-            #         get_mem0_client().add_memory(
-            #             request.message,
-            #             request.user_id,
-            #             metadata={"type": "user_message", "timestamp": str(asyncio.get_event_loop().time())}
-            #         )
-            #     )
-            #     yield emit_event(create_status_event("User message queued for Mem0 storage"))
-            # except Exception as e:
-            #     logger.warning(f"Failed to queue message for Mem0: {e}")
-            yield emit_event(create_status_event("Mem0 storage disabled - conversation saved locally"))
-            
-            yield emit_event(create_done_event())
-            
-        except Exception as e:
-            logger.error(f"Error in streaming chat endpoint: {e}", exc_info=True)
-            yield emit_event(create_error_event(str(e)))
-            yield emit_event(create_done_event())
-    
-    return StreamingResponse(
-        stream_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Transfer-Encoding": "chunked",  # Critical for Docker streaming
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
 
 # ==========================
 # Node-Compatible VC endpoint
@@ -652,7 +350,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                 history=prior_history[-2:] if len(prior_history) > 2 else prior_history,
                 current_message=user_message,
                 user_memories=[],
-                limit=3,  # Router only needs recent context (optimized for speed)
+                limit=3,  # Router needs last 2 turns for context (handles follow-ups like "oui")
                 include_memories=False,
             )
             routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
@@ -679,7 +377,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     history=prior_history,
                     current_message=user_message,
                     user_memories=[],
-                    limit=40,
+                    limit=20,  # Reduced from 40 for faster processing
                     include_memories=False,
                 )
 
