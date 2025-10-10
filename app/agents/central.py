@@ -54,6 +54,10 @@ CHANGEMENT DE SUJET EXPLICITE :
   * "C'est quoi le NEAT?" → GeneralQAAgent
   * "Tapis de course ou dehors?" → GeneralQAAgent
   * "Comment faire un programme muscu?" → PersonalTrainingAgent
+  * "Crée-moi un programme d'entraînement" → PersonalTrainingAgent
+  * "Question au sujet d'un programme d'entrainement" -> PersonalTrainingAgent
+  * "Est ce que j'ai un programme d'entrainement?" -> PersonalTrainingAgent
+  * "Je veux un plan d'entraînement" → PersonalTrainingAgent
   * "Que manger pour perdre du poids?" → NutritionAgent
 
 CONTINUITÉ AVANT CHANGEMENT (pour réponses courtes seulement):
@@ -63,16 +67,16 @@ CONTINUITÉ AVANT CHANGEMENT (pour réponses courtes seulement):
 
 Utilise immédiatement l'outil de handoff adapté :
 - Toute mention de douleur OU toute réponse de suivi douleur → handoff_EnhancedPainAssessmentAgent
-- Création d'un plan d'entraînement uniquement → handoff_PersonalTrainingAgent
+- Demande explicite de création/modification d'un programme d'entraînement/fitness → handoff_PersonalTrainingAgent
 - Création d'un plan alimentaire uniquement → handoff_NutritionAgent
 - Questions générales de santé/fitness NON liées à une douleur → handoff_GeneralQAAgent
 - Si tu ne sais pas quel agent choisir ET que ce n'est pas lié à une douleur → handoff_GeneralQAAgent
 
 RÈGLES DE ROUTAGE (INTERPRÈTE LE MESSAGE ACTUEL DANS SON CONTEXTE) :
 - Agent douleur : dès que le message mentionne une douleur/blessure/gêne OU répond à une question de l'agent douleur (cf. exemples ci-dessus) → envoie à l'agent douleur.
-- Agent entraînement : uniquement si le message demande explicitement « crée-moi un programme », « construis une routine », etc., et que l'utilisateur n'est plus en parcours douleur.
+- Agent entraînement (PersonalTrainingAgent) : UNIQUEMENT si l'utilisateur demande EXPLICITEMENT la création, modification ou consultation d'un programme d'entraînement/fitness (ex: "crée-moi un programme", "fais-moi un plan d'entraînement", "je veux un programme muscu", "montre-moi mon programme"). NE PAS router si c'est juste une question générale sur l'entraînement.
 - Agent nutrition : uniquement si le message demande explicitement un plan alimentaire et qu'il n'y a pas de suivi douleur en cours.
-- Agent General QA : pour les conseils généraux lorsque le parcours douleur est clairement terminé ou que le sujet change.
+- Agent General QA : pour les conseils généraux sur l'entraînement/santé/fitness, questions techniques, ou lorsque le parcours douleur est clairement terminé.
 
 RÈGLES DE DÉCISION SENSIBLES AU CONTEXTE :
 - Maintiens le fil : ne coupe pas une évaluation douleur en plein milieu.
