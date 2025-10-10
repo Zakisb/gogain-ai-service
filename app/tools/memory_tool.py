@@ -9,13 +9,13 @@ This tool allows the QA agent to search and retrieve user memories such as:
 """
 
 from llama_index.core.tools import FunctionTool
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def search_user_memories(query: str, user_id: str, limit: int = 5) -> str:
+def search_user_memories(query: str, limit: int = 5, user_id: Optional[str] = None) -> str:
     """Search user's stored memories/information using semantic search.
 
     Use this tool when the user asks about their personal information, such as:
@@ -27,13 +27,21 @@ def search_user_memories(query: str, user_id: str, limit: int = 5) -> str:
 
     Args:
         query: Search query to find relevant memories (use keywords related to the question)
-        user_id: User identifier (automatically provided by the system)
         limit: Maximum number of memories to return (default: 5)
+        user_id: Ignored placeholder — the backend injects the active user automatically.
+        user_id: (Ignoré) LLMs ne doivent pas le passer; le système le remplace toujours.
 
     Returns:
         String containing found memories, or a message if no memories found
     """
     try:
+        # Resolve user_id from context (never rely on LLM supplied values)
+        try:
+            from app.knowledge.enhanced_assessment_tools import get_user_context
+            user_id = get_user_context() or "unknown_user"
+        except Exception:
+            user_id = "unknown_user"
+
         from app.core.memory import get_mem0_client
 
         mem0_client = get_mem0_client()
@@ -41,7 +49,7 @@ def search_user_memories(query: str, user_id: str, limit: int = 5) -> str:
             return "Memory system is not available. Please provide the information directly."
 
         # Search memories
-        result = mem0_client.search_memories(query=query, user_id=user_id, limit=limit)
+        result = mem0_client.search_memories(query=query, user_id=str(user_id), limit=limit)
 
         if not result.get("success"):
             error = result.get("error", "Unknown error")
@@ -82,7 +90,7 @@ def get_memory_search_tool() -> FunctionTool:
         name="search_user_memories",
         description=(
             "Search user's stored personal information (diet, allergies, gym access, schedule, goals). "
-            "Use when user asks about their own information like 'Am I vegetarian?', 'Do I have gym access?', "
-            "'Am I allergic to X?'. Provide a descriptive search query with keywords."
+            "Automatically uses the active user id; do NOT provide user_id. "
+            "Use when the user asks about their own information like 'Am I végétarien ?' or 'Ai-je accès à une salle ?'."
         )
     )

@@ -41,6 +41,43 @@ def _pain_active_key(user_id: str) -> str:
 def _pain_body_region_key(user_id: str) -> str:
     return f"pain:body_region:{user_id}"
 
+
+def _user_memories_key(user_id: str) -> str:
+    return f"user:memories:{user_id}"
+
+
+# --- User Memories Cache ---
+USER_MEMORIES_TTL_SECONDS = int(os.getenv("USER_MEMORIES_TTL_SECONDS", "600"))  # 10 minutes
+
+async def get_cached_user_memories(user_id: str) -> List[Dict[str, Any]]:
+    """Retrieve cached user memories from Redis."""
+    try:
+        r = get_redis()
+        key = _user_memories_key(user_id)
+        raw_data = await r.get(key)
+        if raw_data:
+            memories = json.loads(raw_data)
+            logger.debug(f"🧠 Cache HIT - Retrieved {len(memories)} cached memories for {user_id}")
+            return memories
+        logger.debug(f"💨 Cache MISS - No cached memories for {user_id}")
+        return []
+    except Exception as e:
+        logger.warning(f"User memories cache read failed for {user_id}: {e}")
+        return []
+
+
+async def cache_user_memories(user_id: str, memories: List[Dict[str, Any]]) -> None:
+    """Store user memories in Redis cache with TTL."""
+    try:
+        r = get_redis()
+        key = _user_memories_key(user_id)
+        payload = json.dumps(memories, ensure_ascii=False)
+        await r.set(key, payload, ex=USER_MEMORIES_TTL_SECONDS)
+        logger.debug(f"🧠 Cached {len(memories)} memories for {user_id} (TTL: {USER_MEMORIES_TTL_SECONDS}s)")
+    except Exception as e:
+        logger.warning(f"User memories cache write failed for {user_id}: {e}")
+
+
 # --- Conversation history ---
 async def get_conversation_history(user_id: str, limit: int = 3) -> List[Dict[str, str]]:
     try:

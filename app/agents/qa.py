@@ -76,27 +76,31 @@ ASSISTANT: Réponse conversationnelle détaillant le concept de NEAT (aucun JSON
 
 
 --------------------------------------------------------------------------------
+## INFORMATIONS UTILISATEUR
+--------------------------------------------------------------------------------
+
+**IMPORTANT: Les informations personnelles de l'utilisateur sont AUTOMATIQUEMENT injectées dans votre contexte**
+- Vous avez accès aux préférences alimentaires, allergies, accès gym, objectifs, etc.
+- Ces informations apparaissent au début du contexte sous "User background/history"
+- UTILISEZ-LES DIRECTEMENT dans vos réponses sans les demander à nouveau
+- Si une information n'est PAS présente dans le contexte, alors demandez-la poliment à l'utilisateur
+
+**Exemples d'utilisation:**
+- "Suis-je végétarien ?" → Vérifiez le contexte utilisateur, si présent utilisez-le directement
+- "Ai-je accès à une salle de sport ?" → Vérifiez le contexte utilisateur
+- "Quels sont mes objectifs ?" → Vérifiez le contexte utilisateur
+
+**Si l'information n'est pas dans le contexte:**
+- Répondez poliment: "Je n'ai pas cette information dans ton profil. Peux-tu me le préciser ?"
+- NE supposez JAMAIS les informations personnelles
+
+--------------------------------------------------------------------------------
 ## OUTILS DISPONIBLES
 --------------------------------------------------------------------------------
 
 **1. get_current_date**
 - APPELEZ CET OUTIL POUR LA DATE ACTUELLE AU FORMAT YYYY-MM-DD
 - UTILISEZ POUR TOUT CONTEXTE TEMPOREL: PLANIFICATION, SUIVI, COMPARAISON DE DATES
-
-**2. search_user_memories (TRÈS IMPORTANT)**
-- APPELEZ CET OUTIL QUAND L'UTILISATEUR POSE UNE QUESTION SUR SES INFORMATIONS PERSONNELLES
-- Exemples de questions qui NÉCESSITENT cet outil:
-  * "Suis-je végétarien ?" → Utilisez search_user_memories(query="régime alimentaire végétarien vegan", user_id=user_id)
-  * "Ai-je accès à une salle de sport ?" → Utilisez search_user_memories(query="accès salle sport gym équipement", user_id=user_id)
-  * "Suis-je allergique au lactose ?" → Utilisez search_user_memories(query="allergie intolérance lactose produits laitiers", user_id=user_id)
-  * "Quel est mon emploi du temps d'entraînement ?" → Utilisez search_user_memories(query="emploi du temps entraînement planning séances", user_id=user_id)
-  * "Quels sont mes objectifs fitness ?" → Utilisez search_user_memories(query="objectifs fitness buts cibles", user_id=user_id)
-
-**RÈGLE CRITIQUE POUR LES MÉMOIRES:**
-- Si l'outil retourne "No information found", répondez POLIMENT: "Je n'ai pas cette information dans ton profil. Peux-tu me le préciser ?"
-- NE dites JAMAIS "Je ne sais pas" sans avoir appelé l'outil d'abord
-- TOUJOURS chercher dans les mémoires AVANT de demander à l'utilisateur
-- Si l'outil trouve l'information, utilisez-la DIRECTEMENT dans votre réponse sans demander confirmation
 
 --------------------------------------------------------------------------------
 ## POUR AUTRES REPONSES NON SALUTATIONS
@@ -158,13 +162,12 @@ def build(llm: BaseLLM) -> FunctionAgent:
     logger = logging.getLogger(__name__)
     # QA agent tools temporarily disabled (tools.py removed)
     from app.tools.date_tool import get_date_tool
-    from app.tools.memory_tool import get_memory_search_tool
 
     tools = [
         get_date_tool(),
-        get_memory_search_tool()  # Memory search for user information
+        # Memory search tool REMOVED - memories are now injected directly into context at request start
     ]
-    logger.info("🏗️ Building GeneralQAAgent with %d tools (Date + Memory)", len(tools))
+    logger.info("🏗️ Building GeneralQAAgent with %d tools (Date only)", len(tools))
 
     agent = FunctionAgent(
         name="GeneralQAAgent",

@@ -36,6 +36,17 @@ def set_user_context(user_id: str):
     _user_id_context.set(user_id)
 
 
+def get_user_context() -> str:
+    """Return the current user_id from contextvars.
+
+    Used by tools that should not trust the LLM to pass user_id.
+    """
+    try:
+        return _user_id_context.get()
+    except Exception:
+        return "unknown_user"
+
+
 # ============================================================================
 # MEM0 CONTEXT MANAGEMENT (Redis-backed, async retrieval)
 # ============================================================================

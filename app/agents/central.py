@@ -588,6 +588,13 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                         "content": tool_result
                                     })
 
+                                    # Emit a lightweight event for the SSE layer to notify UI caches
+                                    try:
+                                        yield {"event": "tool_result", "function_name": tool_name, "status": "ok"}
+                                    except Exception:
+                                        # If yielding from here fails for any reason, continue gracefully
+                                        pass
+
                                 except Exception as e:
                                     logger.error(f"❌ Tool execution failed: {e}")
                                     messages.append({
@@ -595,6 +602,10 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                         "tool_call_id": tc_data["id"],
                                         "content": f"Error: {str(e)}"
                                     })
+                                    try:
+                                        yield {"event": "tool_result", "function_name": tool_name, "status": "error"}
+                                    except Exception:
+                                        pass
 
                             # Continue to next iteration to get final response
                             continue

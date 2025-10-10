@@ -1,6 +1,6 @@
 """Basic chat endpoint using AgentWorkflow with CentralRouterAgent and PainAgent."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
@@ -23,6 +23,8 @@ from app.core.cache import (
     get_pain_agent_session_history as cache_get_pain_agent_session_history,
     end_pain_agent_session as cache_end_pain_agent_session,
     is_pain_agent_session_active as cache_is_pain_agent_session_active,
+    get_cached_user_memories,
+    cache_user_memories,
 )
 
 # Configure logging
@@ -95,6 +97,43 @@ async def end_pain_agent_session(user_id: str):
 async def is_pain_agent_session_active(user_id: str) -> bool:
     """Check if pain agent session is active for user (Redis-backed)."""
     return await cache_is_pain_agent_session_active(user_id)
+
+
+async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Retrieve user memories from Redis cache, or fetch from Mem0 and cache if not available.
+
+    This function is called once at request start to avoid repeated Mem0 API calls during the conversation.
+    Memories are cached in Redis for 10 minutes by default.
+    """
+    # Try cache first
+    cached_memories = await get_cached_user_memories(user_id)
+    if cached_memories:
+        logger.info(f"🧠 Using {len(cached_memories)} cached memories for {user_id}")
+        return cached_memories
+
+    # Cache miss - fetch from Mem0
+    try:
+        mem0_client = get_mem0_client()
+        if not mem0_client:
+            logger.debug(f"🧠 Mem0 client not available for {user_id}")
+            return []
+
+        result = mem0_client.get_memories(user_id=user_id, limit=limit)
+        if result.get("success"):
+            memories = result.get("memories", [])
+            logger.info(f"🧠 Fetched {len(memories)} memories from Mem0 for {user_id}")
+
+            # Cache for future requests
+            if memories:
+                await cache_user_memories(user_id, memories)
+
+            return memories
+        else:
+            logger.warning(f"🧠 Failed to fetch memories from Mem0: {result.get('error')}")
+            return []
+    except Exception as e:
+        logger.error(f"🧠 Error fetching user memories: {e}")
+        return []
 
 
 def build_message_array_context(history, current_message, user_memories=None, limit=3, include_memories=True):
@@ -345,6 +384,54 @@ def emit_vc_event(event_type: str, content: Any) -> str:
     return f"data: {payload}\n\n"
 
 
+def _split_for_frontend_chunks(text: str, just_emitted_backticks: bool) -> (List[str], bool):
+    """Split outgoing text into UI-friendly text_delta chunks.
+
+    Ensures the opening fence appears as two consecutive chunks: first "```", then "json".
+    """
+    chunks: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # If last emission was raw backticks, peel off leading 'json' as a standalone chunk
+        if just_emitted_backticks:
+            if text.startswith("json", i):
+                chunks.append("json")
+                i += 4
+                just_emitted_backticks = False
+                continue
+            else:
+                just_emitted_backticks = False
+
+        # Normalize combined tokens like '```json' or '```\njson'
+        if text.startswith("```json", i):
+            chunks.append("```")
+            chunks.append("json")
+            i += len("```json")
+            continue
+        if text.startswith("```\njson", i):
+            chunks.append("```")
+            chunks.append("json")
+            i += len("```\njson")
+            continue
+
+        # Plain opening fence
+        if text.startswith("```", i):
+            chunks.append("```")
+            just_emitted_backticks = True
+            i += 3
+            continue
+
+        # Aggregate non-special text until next fence start
+        start = i
+        while i < n and not text.startswith("```", i):
+            i += 1
+        if i > start:
+            chunks.append(text[start:i])
+
+    return chunks, just_emitted_backticks
+
+
 def unwrap_pain_agent_response(response_text: str) -> str:
     """Pass-through function for pain agent responses.
 
@@ -385,6 +472,11 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             history = request.conversationHistory or []
 
             logger.info(f"[VC Compat] Starting chat for user {user_id}")
+
+            # 🧠 FETCH USER MEMORIES AT REQUEST START (cached in Redis for 10 minutes)
+            # This avoids repeated Mem0 API calls during conversation
+            # Memories will be injected only into GeneralQA agent context
+            user_memories = await get_or_fetch_user_memories(user_id, limit=20)
 
             # Initialize LLM
             temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.7
@@ -444,12 +536,13 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             else:
                 logger.info(f"🟢 Pain session INACTIVE - building agent context from full history for {user_id}")
                 # Build context from full conversation history (normal flow)
+                # Inject user memories here (GeneralQA agent will receive them)
                 agent_messages = build_message_array_context(
                     history=prior_history,
                     current_message=user_message,
-                    user_memories=[],
+                    user_memories=user_memories,  # Inject cached memories for QA agent
                     limit=20,  # Reduced from 40 for faster processing
-                    include_memories=False,
+                    include_memories=True,  # Enable memory injection for QA agent
                 )
 
             agent_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
@@ -486,12 +579,21 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     return str(chunk)
 
                 try:
+                    just_emitted_backticks = False  # track fence opening for UI protocol
                     async for response_chunk in workflow.run_with_streaming(
                         user_msg=user_message,
                         router_context=routing_messages,
                         agent_context=agent_messages,
                         user_id=user_id,
                     ):
+                        # Handle structured events (e.g., tool_result) emitted by workflow
+                        if isinstance(response_chunk, dict) and response_chunk.get("event") == "tool_result":
+                            fn_name = response_chunk.get("function_name") or response_chunk.get("tool") or "unknown_tool"
+                            status = response_chunk.get("status", "ok")
+                            yield emit_vc_event("tool_result", {"function_name": fn_name, "status": status}) + "\n\n"
+                            await asyncio.sleep(0)
+                            continue
+
                         token = coerce_chunk_to_text(response_chunk)
                         if not token:
                             continue
@@ -505,10 +607,15 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                             t = t[len("assistant:"):].lstrip()
                         if not t:
                             continue
-                        collected_response += t
-                        yield emit_vc_event("text_delta", t) + "\n\n"  # Extra padding for Docker flushing
-                        # Force immediate flush
-                        await asyncio.sleep(0)
+                        # Split to respect frontend's fenced JSON protocol
+                        pieces, just_emitted_backticks = _split_for_frontend_chunks(t, just_emitted_backticks)
+                        for piece in pieces:
+                            if not piece:
+                                continue
+                            collected_response += piece
+                            yield emit_vc_event("text_delta", piece) + "\n\n"  # Extra padding for Docker flushing
+                            # Force immediate flush
+                            await asyncio.sleep(0)
                 except Exception as e:
                     logger.warning(f"[VC Compat] Streaming failed, will fallback: {e}")
 
@@ -752,3 +859,28 @@ async def clear_user_memories(user_id: str):
             raise HTTPException(status_code=500, detail=result["error"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear memories: {str(e)}")
+
+
+# ===============
+# VC compat routes
+# ===============
+
+@legacy_router.put("/virtual-coach/create-openai-thread")
+async def create_openai_thread():
+    """Return a thread id for frontend bootstrap.
+
+    Returns { data: { threadId } } per contract.
+    """
+    import uuid
+    thread_id = f"vc_{uuid.uuid4().hex}"
+    return {"data": {"threadId": thread_id}}
+
+
+@legacy_router.post("/virtual-coach/transcribe-audio")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Accept audio and return a transcription string (compat stub)."""
+    try:
+        name = getattr(file, "filename", "audio") or "audio"
+        return {"transcription": f"[stub] Received {name}. Configure ASR to enable transcription."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")

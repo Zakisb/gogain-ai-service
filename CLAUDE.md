@@ -16,7 +16,7 @@ GoGain AI Coach is a Python microservice built with FastAPI that provides AI-pow
 - **Vector Database**: Pinecone for knowledge embeddings
 - **Embeddings**: Voyage AI (primary) or OpenAI (fallback)
 - **Memory**: Persistent chat memory with JSON storage (migrating to Mem0 for enhanced AI agent memory)
-- **Containerization**: Docker with docker-compose for local development
+- **Containerization**: Docker with docker compose up --build for local development
 
 ### Agent System
 
@@ -48,11 +48,8 @@ pip install -r requirements.txt
 ### Running the Service
 
 ```bash
-# Run FastAPI development server (Pinecone is cloud-hosted)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Or run with Docker setup
-docker-compose up
+# Run FastAPI development server (Qdrant is locally-hosted)
+docker compose up
 ```
 
 ### Knowledge Base Management
@@ -77,14 +74,11 @@ python scripts/embed_documents.py test shoulder --query "What causes shoulder pa
 # Test individual knowledge system components
 python test_components.py
 
-# Test infrastructure (Pinecone connectivity)
-python test_pinecone.py
-
 # Test embedding configuration
 python test_voyage_config.py
 
 # Interactive chat testing
-python interactive_chat.py
+python coach.py
 ```
 
 ## Configuration
@@ -94,10 +88,8 @@ python interactive_chat.py
 Required environment variables:
 
 - `OPENAI_API_KEY`: OpenAI API key
-- `ANTHROPIC_API_KEY`: Anthropic API key
 - `GOOGLE_API_KEY`: Google Gemini API key
 - `VOYAGE_API_KEY`: Voyage AI embeddings (recommended)
-- `PINECONE_API_KEY`: Pinecone vector database API key
 - `DEFAULT_MODEL`: Default LLM model (e.g., "gemini/gemini-pro")
 - `MEM0_API_KEY`: Mem0 API key for enhanced agent memory (optional)
 
@@ -106,7 +98,6 @@ Required environment variables:
 The service uses LiteLLM for model abstraction. Default model is configured in `app/core/config.py`. Supported models include:
 
 - OpenAI: "gpt-3.5-turbo", "gpt-4"
-- Anthropic: "claude-3-sonnet-20240229", "claude-3-haiku-20240307"
 - Google: "gemini/gemini-pro", "gemini/gemini-2.0-flash"
 
 ## Key Directories
