@@ -162,6 +162,64 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
                 "content": system_context
             })
 
+    # Inject Mem0 memory context (if available from background retrieval)
+    try:
+        from app.knowledge.enhanced_assessment_tools import get_mem0_context
+        mem0_context = get_mem0_context(user_id, body_region)
+
+        if mem0_context:
+            # Build memory context text
+            memory_text = "HISTORIQUE MÉDICAL DU PATIENT (depuis Mem0):\n\n"
+
+            if mem0_context.get("previous_episodes"):
+                memory_text += "Épisodes précédents:\n"
+                for episode in mem0_context["previous_episodes"][:5]:
+                    memory_text += f"- {episode}\n"
+                memory_text += "\n"
+
+            if mem0_context.get("treatments_tried"):
+                memory_text += "Traitements essayés:\n"
+                for treatment in mem0_context["treatments_tried"][:5]:
+                    memory_text += f"- {treatment}\n"
+                memory_text += "\n"
+
+            if mem0_context.get("medications"):
+                memory_text += "Médicaments:\n"
+                for med in mem0_context["medications"][:5]:
+                    memory_text += f"- {med}\n"
+                memory_text += "\n"
+
+            if mem0_context.get("triggers"):
+                memory_text += "Facteurs déclencheurs connus:\n"
+                for trigger in mem0_context["triggers"][:5]:
+                    memory_text += f"- {trigger}\n"
+                memory_text += "\n"
+
+            if mem0_context.get("improvements"):
+                memory_text += "Ce qui a aidé dans le passé:\n"
+                for improvement in mem0_context["improvements"][:5]:
+                    memory_text += f"- {improvement}\n"
+                memory_text += "\n"
+
+            if mem0_context.get("red_flags_history"):
+                memory_text += "⚠️ Alertes historiques:\n"
+                for flag in mem0_context["red_flags_history"][:5]:
+                    memory_text += f"- {flag}\n"
+                memory_text += "\n"
+
+            messages.append({
+                "role": "system",
+                "content": memory_text.strip()
+            })
+
+            total_memories = sum(len(v) for v in mem0_context.values())
+            logger.info(f"🧠 Injected {total_memories} Mem0 memories into pain agent context")
+        else:
+            logger.debug(f"🔍 No Mem0 context available yet for user={user_id} region={body_region}")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to inject Mem0 context: {e}")
+
     # Inject questions queue into context (if available)
     try:
         from app.knowledge.enhanced_assessment_tools import get_full_queue_state
@@ -288,7 +346,10 @@ def emit_vc_event(event_type: str, content: Any) -> str:
 
 
 def unwrap_pain_agent_response(response_text: str) -> str:
-    """Parse pain agent structured JSON response and transform to frontend-compatible format.
+    """Pass-through function for pain agent responses.
+
+    The pain agent now outputs frontend-compatible format directly, so no transformation is needed.
+    This function is kept for backwards compatibility and potential future processing needs.
 
     Frontend expects questions in this format:
     <question_text>
@@ -297,54 +358,15 @@ def unwrap_pain_agent_response(response_text: str) -> str:
     {"id": "option2", "label": "Second option"}
     ```
 
-    If response_type is "conclusion", extract the plain text from the conclusion field.
-    If response_type is "question", transform to markdown format with newline-separated JSON objects.
-
     Args:
-        response_text: The raw response from pain agent (possibly JSON)
+        response_text: The response from pain agent (already in frontend format)
 
     Returns:
-        Either transformed markdown format (for questions) or plain text (for conclusions)
+        The response text as-is (already formatted correctly)
     """
-    try:
-        # Try to parse as JSON
-        parsed = json.loads(response_text.strip())
-
-        # Check if it's a structured pain agent response
-        if isinstance(parsed, dict) and "response_type" in parsed:
-            response_type = parsed.get("response_type")
-
-            if response_type == "conclusion":
-                # Unwrap conclusion to plain text
-                conclusion_text = parsed.get("conclusion", "")
-                logger.info(f"🔓 Unwrapped pain agent conclusion ({len(conclusion_text)} chars)")
-                return conclusion_text
-            elif response_type == "question":
-                # Transform to frontend format: question_text\n```json\n{options}\n```
-                question_text = parsed.get("question", "")
-                options = parsed.get("options", [])
-
-                if not question_text or not options:
-                    logger.warning("⚠️ Malformed question JSON, returning as-is")
-                    return response_text  # Fallback to original if malformed
-
-                # Build frontend-compatible format
-                output = question_text + "\n```json\n"
-                for option in options:
-                    if isinstance(option, dict) and "id" in option and "label" in option:
-                        # One JSON object per line, no commas between objects
-                        output += json.dumps(option, ensure_ascii=False) + "\n"
-                output += "```"
-
-                logger.info(f"❓ Transformed pain agent question to frontend format ({len(options)} options)")
-                return output
-
-        # Not a structured response, return as-is
-        return response_text
-
-    except (json.JSONDecodeError, ValueError):
-        # Not JSON, return as-is
-        return response_text
+    # Pain agent now outputs frontend format directly - no transformation needed
+    logger.info(f"✅ Pain agent response already in frontend format ({len(response_text)} chars)")
+    return response_text.strip()
 
 
 @legacy_router.post("/virtual-coach/chat")
@@ -542,11 +564,101 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     logger.info(f"🔴 Starting new pain session for {user_id}")
                     await start_pain_agent_session(user_id)
 
+                    # 🚀 LAUNCH INITIAL RAG RETRIEVAL (non-blocking background thread)
+                    # This pre-populates the question queue for the pain agent
+                    try:
+                        from app.knowledge.enhanced_assessment_tools import launch_initial_pain_rag, launch_mem0_retrieval
+                        # Extract body region from user message (simple heuristic)
+                        body_region = "general"  # Default
+                        message_lower = user_message.lower()
+                        region_map = {
+                            "dos": ["dos", "lombaire", "colonne"],
+                            "épaule": ["épaule", "epaule"],
+                            "genou": ["genou", "genoux"],
+                            "cou": ["cou", "cervical"],
+                            "hanche": ["hanche"],
+                            "cheville": ["cheville", "pied"],
+                        }
+                        for region, keywords in region_map.items():
+                            if any(kw in message_lower for kw in keywords):
+                                body_region = region
+                                break
+
+                        logger.info(f"🚀 Launching initial RAG for user={user_id} region={body_region}")
+                        launch_initial_pain_rag(user_id, body_region, user_message)
+
+                        # 🧠 LAUNCH MEM0 RETRIEVAL (async, non-blocking)
+                        logger.info(f"🧠 Launching Mem0 retrieval for user={user_id} region={body_region}")
+                        launch_mem0_retrieval(user_id, body_region, user_message)
+
+                    except Exception as e:
+                        logger.error(f"❌ Failed to launch initial RAG/Mem0: {e}")
+                        # Don't fail the request if RAG/Mem0 launch fails
+
                 # ALWAYS add both user message and assistant response to the pain session storage
                 # (the user message was used in context building but not yet persisted to session)
                 await add_to_pain_agent_session(user_id, user_message, "user")
                 await add_to_pain_agent_session(user_id, final_response_content, "assistant")
+
+                # 🧠 MEM0 STORAGE DISABLED FOR PAIN AGENT
+                # Pain assessments will be stored in normal database after summary generation
+                # Mem0 is now used only by QA agent for general user information (diet, allergies, gym access, etc.)
+
+                # # 🧠 STORE TO MEM0 (long-term memory extraction)
+                # # Mem0 automatically extracts meaningful facts from conversations
+                # try:
+                #     from app.core.cache import get_pain_session_body_region
+                #
+                #     mem0_client = get_mem0_client()
+                #     if mem0_client:
+                #         # Get body_region from session (set during RAG tool calls or initial extraction)
+                #         body_region = await get_pain_session_body_region(user_id)
+                #
+                #         # Store user message with pain context metadata
+                #         mem0_client.add_memory(
+                #             message=user_message,
+                #             user_id=user_id,
+                #             metadata={
+                #                 "type": "pain_conversation",
+                #                 "body_region": body_region,
+                #                 "role": "user",
+                #                 "agent": "EnhancedPainAssessmentAgent"
+                #             }
+                #         )
+                #         logger.debug(f"🧠 Stored user message to Mem0 for user={user_id} region={body_region}")
+                # except Exception as e:
+                #     logger.warning(f"⚠️ Failed to store user message to Mem0: {e}")
+                #     # Don't fail the request if Mem0 storage fails
+
                 # Pain session remains active for next turn
+            elif handling_agent == "GeneralQAAgent":
+                # QA agent handled request - store to Mem0 for general user information
+                logger.info(f"🟢 QA agent handled request - storing to Mem0 for {user_id}")
+
+                # End pain session if active (user switched to Q&A)
+                if await is_pain_agent_session_active(user_id):
+                    logger.info(f"🟢 QA agent handled request - ending pain session for {user_id}")
+                    await end_pain_agent_session(user_id)
+
+                # 🧠 STORE TO MEM0 (for general user information - diet, allergies, gym, preferences)
+                try:
+                    mem0_client = get_mem0_client()
+                    if mem0_client:
+                        # Store user message (Mem0 will extract facts automatically)
+                        mem0_client.add_memory(
+                            message=user_message,
+                            user_id=user_id,
+                            metadata={
+                                "type": "qa_conversation",
+                                "role": "user",
+                                "agent": "GeneralQAAgent"
+                            }
+                        )
+                        logger.info(f"🧠 Stored QA user message to Mem0 for user={user_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to store QA message to Mem0: {e}")
+                    # Don't fail the request if Mem0 storage fails
+
             elif handling_agent and handling_agent != "CentralRouterAgent":
                 # Different specialist agent handled request - end pain session if active
                 if await is_pain_agent_session_active(user_id):

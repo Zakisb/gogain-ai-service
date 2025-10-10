@@ -35,6 +35,65 @@ def set_user_context(user_id: str):
     """
     _user_id_context.set(user_id)
 
+
+# ============================================================================
+# MEM0 CONTEXT MANAGEMENT (Redis-backed, async retrieval)
+# ============================================================================
+
+def _mem0_context_key(user_id: str, body_region: str) -> str:
+    """Build Redis key for storing Mem0 memory context."""
+    safe_user = _sanitize_for_key(user_id)
+    safe_region = _sanitize_for_key(body_region)
+    return f"pain:mem0:{safe_user}:{safe_region}"
+
+
+def store_mem0_context(user_id: str, body_region: str, context: Dict[str, Any], ttl: int = 1800) -> None:
+    """Store Mem0 memory context in Redis for pain agent consumption.
+
+    Args:
+        user_id: User identifier
+        body_region: Body region being assessed
+        context: Memory context dict with categorized memories
+        ttl: Time-to-live in seconds (default 30 minutes)
+    """
+    try:
+        redis_client = get_sync_redis()
+        key = _mem0_context_key(user_id, body_region)
+
+        redis_client.setex(
+            key,
+            ttl,
+            json.dumps(context, ensure_ascii=False)
+        )
+
+        logger.info(f"✅ [Mem0] Stored memory context for user={user_id} region={body_region}")
+
+    except Exception as exc:
+        logger.error(f"❌ [Mem0] Failed to store context for user={user_id}: {exc}")
+
+
+def get_mem0_context(user_id: str, body_region: str) -> Optional[Dict[str, Any]]:
+    """Retrieve Mem0 memory context from Redis.
+
+    Returns None if not available yet (async retrieval still in progress).
+    """
+    try:
+        redis_client = get_sync_redis()
+        key = _mem0_context_key(user_id, body_region)
+
+        data = redis_client.get(key)
+        if not data:
+            logger.debug(f"🔍 [Mem0] No context found for user={user_id} region={body_region}")
+            return None
+
+        context = json.loads(data)
+        logger.info(f"✅ [Mem0] Retrieved memory context for user={user_id} region={body_region}")
+        return context
+
+    except Exception as exc:
+        logger.error(f"❌ [Mem0] Failed to retrieve context for user={user_id}: {exc}")
+        return None
+
 # Global instances for startup optimization
 _COMPILED_PATTERNS = None
 
@@ -417,8 +476,9 @@ def get_full_queue_state(user_id: str, body_region: str) -> Dict[str, Any]:
         }
 
 
+# Using v2 collection with enhanced metadata (questions, red flags, patient statements)
 PRIMARY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks_v2"
-LEGACY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks"
+LEGACY_HIERARCHICAL_COLLECTION = "pain_hierarchical_chunks"  # Fallback if needed
 
 class ClinicalPriority(Enum):
     """Clinical priority levels for knowledge retrieval."""
@@ -445,33 +505,34 @@ class EnhancedRAGAssessmentRetriever:
 
     def _precache_collections(self):
         """Pre-cache available collections with fallback logic."""
-        # Try hierarchical first, fallback to any available collection
-        fallback_collections = [
-            PRIMARY_HIERARCHICAL_COLLECTION,
-            LEGACY_HIERARCHICAL_COLLECTION,
-            "questions",
-            "test_questions",
-        ]
-
-        for collection in fallback_collections:
-            try:
-                self._get_index(collection)
-                print(f"✓ Cached collection: {collection}")
-                return  # Successfully cached at least one
-            except Exception as e:
-                print(f"⚠ Could not cache {collection}: {e}")
-                continue
-
-        print("⚠️ WARNING: No collections available - RAG will be disabled")
+        # Use only the working hierarchical collection
+        try:
+            self._get_index(PRIMARY_HIERARCHICAL_COLLECTION)
+            print(f"✅ Cached collection: {PRIMARY_HIERARCHICAL_COLLECTION}")
+            return
+        except Exception as e:
+            print(f"❌ Could not cache {PRIMARY_HIERARCHICAL_COLLECTION}: {e}")
+            print("⚠️ WARNING: No collections available - RAG will be disabled")
     
     def _get_index(self, collection_name: str) -> VectorStoreIndex:
         """Get or create vector index for specified Qdrant collection."""
         if collection_name not in self._indices_cache:
-            vector_store = QdrantVectorStore(
-                client=self.qdrant_client,
-                collection_name=collection_name,
-                vector_name="text-dense",
-            )
+            # pain_hierarchical_chunks uses single unnamed vector (no vector_name needed)
+            # pain_hierarchical_chunks_v2 uses named vector "text-dense"
+            # Only specify vector_name for v2 collection
+            if collection_name == "pain_hierarchical_chunks_v2":
+                vector_store = QdrantVectorStore(
+                    client=self.qdrant_client,
+                    collection_name=collection_name,
+                    vector_name="text-dense",  # Named vector for v2
+                )
+            else:
+                # Single unnamed vector (v1 and other collections)
+                vector_store = QdrantVectorStore(
+                    client=self.qdrant_client,
+                    collection_name=collection_name,
+                    # No vector_name parameter for single unnamed vectors
+                )
             index = VectorStoreIndex.from_vector_store(vector_store)
             self._indices_cache[collection_name] = index
 
@@ -640,27 +701,9 @@ class EnhancedRAGAssessmentRetriever:
                            conversation_context: str = "") -> List[Dict[str, Any]]:
         """Pure Semantic RAG: Retrieve from hierarchical chunks with AI-driven understanding."""
         try:
-            # Try multiple collections with fallback logic
-            collection_candidates = [
-                PRIMARY_HIERARCHICAL_COLLECTION,
-                LEGACY_HIERARCHICAL_COLLECTION,
-                "questions",
-                "test_questions",
-            ]
-
-            index = None
-            collection_name = None
-            for candidate in collection_candidates:
-                try:
-                    index = self._get_index(candidate)
-                    collection_name = candidate
-                    break
-                except Exception:
-                    continue
-
-            if index is None:
-                print("❌ No RAG collections available - returning empty results")
-                return []
+            # Use the primary (stable) hierarchical collection
+            index = self._get_index(PRIMARY_HIERARCHICAL_COLLECTION)
+            collection_name = PRIMARY_HIERARCHICAL_COLLECTION
 
             # Build enriched semantic query
             enriched_query = self._build_semantic_query(
@@ -1293,6 +1336,7 @@ def create_llm_driven_rag_tool() -> FunctionTool:
             body_region: Body region being assessed (e.g., "dos", "epaule")
             conversation_history: Summary of conversation so far
             rag_queries: Optional list of semantic search queries generated by the agent
+                        If None, uses predefined initial queries for comprehensive coverage
             hyde_snippet: Optional HyDE-style snippet provided by the agent
 
         Returns:
@@ -1309,7 +1353,14 @@ def create_llm_driven_rag_tool() -> FunctionTool:
         elif isinstance(rag_queries, list):
             candidate_queries = rag_queries
         elif rag_queries is None:
-            candidate_queries = []
+            # Use predefined initial queries for comprehensive coverage
+            candidate_queries = [
+                f"questions d'évaluation {body_region}",
+                f"examen clinique {body_region}",
+                f"diagnostic différentiel {body_region}",
+                f"red flags {body_region}",
+                f"tests cliniques {body_region}",
+            ]
         else:
             raise ValueError(
                 "The 'rag_queries' parameter must be a list of agent-generated search strings."
@@ -1323,7 +1374,7 @@ def create_llm_driven_rag_tool() -> FunctionTool:
             if cleaned:
                 normalized_queries.append(cleaned)
 
-        query_source = "agent"
+        query_source = "initial_automatic" if rag_queries is None else "agent"
         if not normalized_queries:
             fallback_query = (conversation_history or "").strip()
             if fallback_query:
@@ -1494,6 +1545,137 @@ def create_llm_driven_rag_tool() -> FunctionTool:
 
 # Queue management tools removed - queue contents are now fed directly into agent context
 # The agent uses questions as inspiration without needing tools to access the queue
+
+
+def launch_initial_pain_rag(user_id: str, body_region: str, initial_message: str) -> None:
+    """Launch initial RAG automatically when pain assessment starts.
+
+    Programmatic wrapper that calls retrieve_with_llm_queries with predefined queries.
+    Non-blocking - runs in background thread.
+
+    Args:
+        user_id: User identifier (set in context variable before calling)
+        body_region: Body region being assessed
+        initial_message: User's initial pain message
+    """
+    logger.info(f"🚀 AUTO-RAG: Launching initial retrieval for user={user_id} region={body_region}")
+
+    # Set user context for the background thread
+    set_user_context(user_id)
+
+    # Create tool instance and call it programmatically (rag_queries=None triggers predefined queries)
+    tool = create_llm_driven_rag_tool()
+    tool.fn(
+        body_region=body_region,
+        conversation_history=initial_message,
+        rag_queries=None,  # None = use predefined initial queries
+        hyde_snippet=None
+    )
+
+
+def launch_mem0_retrieval(user_id: str, body_region: str, initial_message: str) -> None:
+    """Launch Mem0 memory retrieval asynchronously when pain assessment starts.
+
+    Non-blocking - runs in background thread and stores results in Redis.
+    Pain agent will pick up results when available.
+
+    Args:
+        user_id: User identifier
+        body_region: Body region being assessed
+        initial_message: User's initial pain description
+    """
+    logger.info(f"🧠 AUTO-MEM0: Launching memory retrieval for user={user_id} region={body_region}")
+
+    def _background_mem0_worker():
+        """Execute Mem0 retrieval in background thread and store in Redis."""
+        try:
+            # Import Mem0 client (lazy-loaded)
+            from app.core.memory import get_mem0_client
+
+            mem0_client = get_mem0_client()
+            if not mem0_client:
+                logger.warning(f"⚠️ [Mem0] Client not available (MEM0_API_KEY not set), skipping retrieval")
+                return
+
+            logger.info(f"🔍 [Mem0] Retrieving memories for user={user_id} region={body_region}")
+
+            # Use semantic queries mapped to clinical categories
+            # Each query's results are semantically relevant to that category
+            semantic_queries = {
+                "previous_episodes": f"épisodes antérieurs douleur {body_region} historique",
+                "treatments_tried": f"traitements essayés thérapies {body_region}",
+                "medications": f"médicaments pris anti-inflammatoires antalgiques {body_region}",
+                "triggers": f"facteurs déclencheurs aggravation douleur {body_region}",
+                "improvements": f"améliorations progrès soulagement {body_region}",
+                "red_flags_history": f"signaux d'alarme red flags urgence {body_region}"
+            }
+
+            categorized_context = {
+                "previous_episodes": [],
+                "treatments_tried": [],
+                "medications": [],
+                "triggers": [],
+                "improvements": [],
+                "red_flags_history": []
+            }
+
+            # Use semantic search for each category - trust Mem0's semantic ranking
+            for category, query in semantic_queries.items():
+                try:
+                    result = mem0_client.search_memories_with_recency(
+                        query=query,
+                        user_id=user_id,
+                        limit=5,
+                        recency_weight=0.3
+                    )
+
+                    if result.get("success"):
+                        memories = result.get("memories", [])
+
+                        for memory in memories:
+                            if not isinstance(memory, dict):
+                                continue
+
+                            memory_text = memory.get("memory", "") or memory.get("text", "")
+                            if memory_text and memory_text not in categorized_context[category]:
+                                categorized_context[category].append(memory_text)
+
+                        logger.debug(f"🔍 [Mem0] Category '{category}' found {len(categorized_context[category])} memories")
+
+                except Exception as e:
+                    logger.error(f"❌ [Mem0] Category query '{category}' failed: {e}")
+                    continue
+
+            # Store in Redis for pain agent (even if empty - signals retrieval is done)
+            store_mem0_context(user_id, body_region, categorized_context)
+
+            total_memories = sum(len(v) for v in categorized_context.values())
+            logger.info(
+                f"✅ [Mem0] Stored {total_memories} categorized memories for user={user_id} region={body_region}"
+            )
+
+            print(f"🧠 Mem0 retrieval complete: {total_memories} memories stored in Redis")
+
+        except Exception as exc:
+            logger.error(
+                f"❌ [Mem0] Background retrieval failed for user={user_id} region={body_region}: {exc}",
+                exc_info=True
+            )
+            # Store empty context on failure so agent doesn't wait forever
+            store_mem0_context(user_id, body_region, {
+                "previous_episodes": [],
+                "treatments_tried": [],
+                "medications": [],
+                "triggers": [],
+                "improvements": [],
+                "red_flags_history": []
+            })
+
+    # Launch background thread (daemon so it doesn't block shutdown)
+    thread_name = f"mem0-bg-{_sanitize_for_key(user_id)}-{_sanitize_for_key(body_region)}"
+    threading.Thread(target=_background_mem0_worker, name=thread_name, daemon=True).start()
+
+    logger.info(f"🚀 [Mem0] Background retrieval thread started for user={user_id}")
 
 
 def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:

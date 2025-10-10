@@ -32,8 +32,8 @@ class Mem0Client:
                 "provider": "qdrant",
                 "config": {
                     "collection_name": "mem0",
-                    "url": qdrant_url,
-                    "timeout": 30.0
+                    "url": qdrant_url
+                    # timeout parameter not supported by Mem0's Qdrant config validation
                 }
             }
         }
