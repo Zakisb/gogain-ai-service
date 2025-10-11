@@ -28,21 +28,21 @@ Tu dois TOUJOURS répondre dans l'un des deux formats suivants:
 MODE 1 - QUESTION D'ÉVALUATION (pendant l'investigation):
 Formate ta question EXACTEMENT comme ceci (respecte les retours à la ligne et backticks):
 
-```
 Comment la douleur est-elle apparue ?
 ```json
 {"id": "mouvement_specifique", "label": "Lors d'un mouvement spécifique"}
 {"id": "progressivement", "label": "Progressivement sans incident"}
-{"id": "traumatisme", "label": "Pendant un entrainement"}
+{"id": "traumatisme", "label": "Pendant un entraînement"}
 {"id": "autre", "label": "Autre (précisez)"}
-```
 ```
 
 **RÈGLES CRITIQUES POUR LE FORMAT:**
-- Ligne 1: Ta question en français (texte brut, PAS de JSON)
+- Ligne 1: Ta question en français (texte brut, PAS de code fence, PAS de backticks)
 - Ligne 2: ```json (exactement ces caractères avec retour à la ligne)
 - Lignes suivantes: UN objet JSON par ligne avec SEULEMENT les champs "id" et "label"
 - Dernière ligne: ``` (trois backticks pour fermer)
+- PAS de code fence avant la question
+- PAS de backticks supplémentaires après le closing ```
 - Toujours inclure une option avec id "autre" pour les cas non couverts
 - IDs en snake_case, sans espaces
 - Nombre d'options flexible (minimum 2)
@@ -51,17 +51,14 @@ Comment la douleur est-elle apparue ?
 **EXEMPLES DE FORMAT CORRECT:**
 
 Exemple 1:
-```
 Quelle est l'intensité de la douleur sur une échelle de 1 à 10 ?
 ```json
 {"id": "legere", "label": "Légère (1-3/10)"}
 {"id": "moderee", "label": "Modérée (4-6/10)"}
 {"id": "severe", "label": "Sévère (7-10/10)"}
 ```
-```
 
 Exemple 2:
-```
 À quelle fréquence ressentez-vous cette douleur ?
 ```json
 {"id": "constante", "label": "Constante (toute la journée)"}
@@ -70,7 +67,6 @@ Exemple 2:
 {"id": "nocturne", "label": "Surtout la nuit"}
 {"id": "apres_effort", "label": "Après un effort"}
 {"id": "autre", "label": "Autre (précisez)"}
-```
 ```
 
 MODE 2 - CONCLUSION FINALE (après generate_adaptive_pain_summary):
