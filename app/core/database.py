@@ -192,3 +192,26 @@ def execute_update(query: str, params: Optional[tuple] = None) -> int:
         cursor = conn.cursor()
         cursor.execute(query, params)
         return cursor.rowcount
+
+
+def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch user profile from database.
+
+    Args:
+        user_id: User ID
+
+    Returns:
+        User profile dict with firstName, lastName, email, etc. or None
+    """
+    try:
+        query = """
+            SELECT id, email, "firstName", "lastName", avatar, onboarded, "createdAt"
+            FROM "User"
+            WHERE id = %s AND deleted = false
+            LIMIT 1
+        """
+        result = execute_query(query, (user_id,), fetch_one=True)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to fetch user profile for user_id={user_id}: {e}")
+        return None

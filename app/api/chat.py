@@ -25,7 +25,10 @@ from app.core.cache import (
     is_pain_agent_session_active as cache_is_pain_agent_session_active,
     get_cached_user_memories,
     cache_user_memories,
+    get_cached_user_profile,
+    cache_user_profile,
 )
+from app.core.database import get_user_profile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -136,9 +139,59 @@ async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict
         return []
 
 
-def build_message_array_context(history, current_message, user_memories=None, limit=3, include_memories=True):
+async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
+    """Retrieve user profile from Redis cache, or fetch from database and cache if not available.
+
+    This function is called once at request start to avoid repeated database queries.
+    Profile is cached in Redis for 1 hour by default.
+    """
+    # Try cache first
+    cached_profile = await get_cached_user_profile(user_id)
+    if cached_profile:
+        logger.info(f"👤 Using cached profile for user {user_id}")
+        return cached_profile
+
+    # Cache miss - fetch from database
+    try:
+        profile = get_user_profile(int(user_id))
+        if profile:
+            logger.info(f"👤 Fetched profile from database for user {user_id}")
+            # Cache for future requests
+            await cache_user_profile(user_id, profile)
+            return profile
+        else:
+            logger.warning(f"👤 No profile found in database for user {user_id}")
+            return {}
+    except Exception as e:
+        logger.error(f"👤 Error fetching user profile: {e}")
+        return {}
+
+
+def build_message_array_context(history, current_message, user_profile=None, user_memories=None, limit=3, include_memories=True):
     """Build universal message array context that works with all LLM providers."""
     messages = []
+
+    # Add user profile as system context (if available)
+    if user_profile:
+        profile_parts = []
+        first_name = user_profile.get("firstName") or user_profile.get("firstname")
+        last_name = user_profile.get("lastName") or user_profile.get("lastname")
+
+        if first_name:
+            profile_parts.append(f"User's name: {first_name}")
+            if last_name:
+                profile_parts[0] = f"User's name: {first_name} {last_name}"
+
+        email = user_profile.get("email")
+        if email:
+            profile_parts.append(f"Email: {email}")
+
+        if profile_parts:
+            profile_context = "User Profile:\n" + "\n".join(profile_parts)
+            messages.append({
+                "role": "system",
+                "content": profile_context
+            })
 
     # Add user memories as system context (if enabled and available)
     if include_memories and user_memories:
@@ -473,6 +526,10 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
 
             logger.info(f"[VC Compat] Starting chat for user {user_id}")
 
+            # 👤 FETCH USER PROFILE AT REQUEST START (cached in Redis for 1 hour)
+            # This avoids repeated database queries and provides user name for personalization
+            user_profile = await get_or_fetch_user_profile(user_id)
+
             # 🧠 FETCH USER MEMORIES AT REQUEST START (cached in Redis for 10 minutes)
             # This avoids repeated Mem0 API calls during conversation
             # Memories will be injected only into GeneralQA agent context
@@ -536,10 +593,11 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             else:
                 logger.info(f"🟢 Pain session INACTIVE - building agent context from full history for {user_id}")
                 # Build context from full conversation history (normal flow)
-                # Inject user memories here (GeneralQA agent will receive them)
+                # Inject user profile and memories here (GeneralQA agent will receive them)
                 agent_messages = build_message_array_context(
                     history=prior_history,
                     current_message=user_message,
+                    user_profile=user_profile,  # Inject user profile for personalization
                     user_memories=user_memories,  # Inject cached memories for QA agent
                     limit=20,  # Reduced from 40 for faster processing
                     include_memories=True,  # Enable memory injection for QA agent

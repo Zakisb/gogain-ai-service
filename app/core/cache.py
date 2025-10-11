@@ -46,8 +46,15 @@ def _user_memories_key(user_id: str) -> str:
     return f"user:memories:{user_id}"
 
 
+def _user_profile_key(user_id: str) -> str:
+    return f"user:profile:{user_id}"
+
+
 # --- User Memories Cache ---
 USER_MEMORIES_TTL_SECONDS = int(os.getenv("USER_MEMORIES_TTL_SECONDS", "600"))  # 10 minutes
+
+# --- User Profile Cache ---
+USER_PROFILE_TTL_SECONDS = int(os.getenv("USER_PROFILE_TTL_SECONDS", "3600"))  # 1 hour
 
 async def get_cached_user_memories(user_id: str) -> List[Dict[str, Any]]:
     """Retrieve cached user memories from Redis."""
@@ -76,6 +83,36 @@ async def cache_user_memories(user_id: str, memories: List[Dict[str, Any]]) -> N
         logger.debug(f"🧠 Cached {len(memories)} memories for {user_id} (TTL: {USER_MEMORIES_TTL_SECONDS}s)")
     except Exception as e:
         logger.warning(f"User memories cache write failed for {user_id}: {e}")
+
+
+# --- User Profile Cache ---
+async def get_cached_user_profile(user_id: str) -> Dict[str, Any]:
+    """Retrieve cached user profile from Redis."""
+    try:
+        r = get_redis()
+        key = _user_profile_key(user_id)
+        raw_data = await r.get(key)
+        if raw_data:
+            profile = json.loads(raw_data)
+            logger.debug(f"👤 Cache HIT - Retrieved cached profile for user {user_id}")
+            return profile
+        logger.debug(f"💨 Cache MISS - No cached profile for user {user_id}")
+        return {}
+    except Exception as e:
+        logger.warning(f"User profile cache read failed for {user_id}: {e}")
+        return {}
+
+
+async def cache_user_profile(user_id: str, profile: Dict[str, Any]) -> None:
+    """Store user profile in Redis cache with TTL."""
+    try:
+        r = get_redis()
+        key = _user_profile_key(user_id)
+        payload = json.dumps(profile, ensure_ascii=False)
+        await r.set(key, payload, ex=USER_PROFILE_TTL_SECONDS)
+        logger.debug(f"👤 Cached profile for user {user_id} (TTL: {USER_PROFILE_TTL_SECONDS}s)")
+    except Exception as e:
+        logger.warning(f"User profile cache write failed for {user_id}: {e}")
 
 
 # --- Conversation history ---
