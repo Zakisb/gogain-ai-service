@@ -579,6 +579,12 @@ class EnhancedAgentWorkflow(AgentWorkflow):
 
                                     if tool_fn:
                                         logger.info(f"⚙️ Calling tool: {tool_name}")
+
+                                        # Inject user_id programmatically for training tools
+                                        if tool_name in ['check_user_training_program', 'create_training_program', 'get_user_training_program']:
+                                            tool_args['user_id'] = str(self._user_id)
+                                            logger.info(f"💉 Injected user_id={self._user_id} into {tool_name}")
+
                                         result = tool_fn(**tool_args)
                                         tool_result = str(result)
                                     else:
