@@ -747,12 +747,13 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
 
             prior_history = to_history_pairs(history)
 
-            # Build router context with minimal history for fast routing decisions
+            # Build router context with sufficient history for workflow continuity
+            # Need to see enough turns to understand if user is in training/pain workflow
             routing_messages = build_message_array_context(
-                history=prior_history[-2:] if len(prior_history) > 2 else prior_history,
+                history=prior_history[-8:] if len(prior_history) > 8 else prior_history,
                 current_message=user_message,
                 user_memories=[],
-                limit=3,  # Router needs last 2 turns for context (handles follow-ups like "oui")
+                limit=10,  # Router needs last 8 turns to maintain workflow context (training program creation, pain assessment)
                 include_memories=False,
             )
             routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})

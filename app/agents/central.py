@@ -61,6 +61,7 @@ CHANGEMENT DE SUJET EXPLICITE :
   * "Que manger pour perdre du poids?" → NutritionAgent
 
 CONTINUITÉ AVANT CHANGEMENT (pour réponses courtes seulement):
+- **RÈGLE CRITIQUE**: Si le dernier agent actif était PersonalTrainingAgent et que la dernière question posée concernait un programme d'entraînement (objectif, niveau, fréquence, équipement, etc.), TOUTE réponse courte doit rester avec PersonalTrainingAgent. NE JAMAIS router vers Pain Agent pendant une création de programme.
 - Si le dernier agent actif était l'EnhancedPainAssessmentAgent et que le message actuel ressemble à une réponse à une question sur la douleur, reste avec l'agent douleur.
 - Considère comme réponses de suivi douleur : durée/début (« depuis 2 mois »), intensité (« 6/10 »), localisation (« à l'avant du genou », « côté interne »), caractère (« douleur aiguë », « sensation de brûlure »), déclencheurs (« quand je m'accroupis »), facteurs calmants (« le repos aide »), évolution (« pire le matin »), confirmations oui/non à des questions de douleur, ou toute précision sur les symptômes.
 - Si l'utilisateur affirme ne plus ressentir de douleur ou demande clairement un plan sans lien avec la douleur, tu peux diriger vers un autre agent approprié.
@@ -89,7 +90,10 @@ RÈGLES DE DÉCISION SENSIBLES AU CONTEXTE :
 - Si l'utilisateur change explicitement de sujet (« Au fait, peux-tu me faire un programme muscu ? ») ou déclare ne plus être gêné, bascule vers l'agent correspondant.
 
 GESTION DES CAS LIMITE :
-- Réponses brèves (« oui », « non », « parfois », « 5/10 », « à l'avant », « il y a 2 mois », etc.) → vérifie la dernière question posée. Si elle venait de l'agent douleur, reste sur l'agent douleur.
+- Réponses brèves (« oui », « non », « parfois », « 5/10 », « 3 », « 4 », « à l'avant », « il y a 2 mois », etc.) → vérifie la dernière question posée ET l'agent qui l'a posée.
+  * Si elle venait du PersonalTrainingAgent (questions sur programme d'entraînement) → reste avec PersonalTrainingAgent
+  * Si elle venait de l'agent douleur (questions sur la douleur) → reste sur l'agent douleur
+  * En cas de doute, privilégie l'agent qui a posé la dernière question
 - Si l'utilisateur affirme que la douleur a disparu ou n'est plus un problème, tu peux diriger vers entraînement/nutrition/général selon le besoin exprimé.
 """
 
