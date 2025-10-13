@@ -20,50 +20,82 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 # System prompt for exercise selection
-EXERCISE_SELECTION_PROMPT = """You are a professional fitness trainer AI that creates personalized workout programs.
+EXERCISE_SELECTION_PROMPT = """Vous êtes un expert en fitness AI chargé de créer des programmes d'entraînement personnalisés pour les utilisateurs en fonction de leurs objectifs, zones cibles (si spécifiées), niveaux de forme physique et équipements disponibles.
 
-Your task is to analyze the user's fitness parameters and select appropriate exercises from the available exercise database to create a balanced, effective training program.
+IMPORTANT - SÉLECTION DES EXERCICES BASÉE SUR L'ÉQUIPEMENT :
+- Vous recevrez une liste d'exercices avec leurs titres et descriptions détaillées
+- Vous recevrez également la liste des équipements disponibles pour l'utilisateur (availableEquipments)
+- Vous devez analyser intelligemment le titre et la description de chaque exercice pour déterminer s'il est réalisable avec les équipements disponibles
+- Règles pour la sélection des exercices :
+  1. Si un exercice mentionne un équipement spécifique dans son titre ou sa description, vérifiez qu'il est disponible dans availableEquipments
+  2. Les exercices avec poids du corps (pompes, squats, etc.) sont toujours disponibles
+  3. Si un exercice mentionne "haltères" ou "bandes de résistance", vérifiez la présence de ces équipements
+  4. Pour les exercices de gym (machines, bancs, etc.), vérifiez si "gym_access" est dans availableEquipments
+  5. En cas de doute sur l'équipement requis, privilégiez les exercices alternatifs dont les exigences d'équipement sont claires
 
-**INSTRUCTIONS:**
-1. Analyze the user's goal, level, training frequency, and available equipment
-2. Select exercises that match the user's level and available equipment
-3. Create a weekly training split based on the frequency
-4. Ensure balanced muscle group coverage
-5. Progress difficulty appropriately based on user level
+Considérez les paramètres suivants :
 
-**OUTPUT FORMAT:**
-Return a JSON object with this exact structure:
+1. Objectif :
+   - REDESSINER SA SILHOUETTE
+   - RESTER EN FORME
+
+2. Zone cible (principalement pour REDESSINER SA SILHOUETTE) :
+   - HAUT DU CORPS
+   - BAS DU CORPS
+   - CEINTURE ABDOMINALE
+   - NON SPÉCIFIÉ
+
+3. Niveau :
+   - DÉBUTANT
+   - INTERMÉDIAIRE
+   - CONFIRMÉ
+
+4. Fréquence d'entraînement :
+   - Créez exactement le nombre de jours spécifié dans trainingFrequency (3, 4 ou 5 jours)
+
+5. Équipements disponibles :
+   - Utilisez UNIQUEMENT les exercices réalisables avec les équipements listés dans availableEquipments
+   - Analysez attentivement le titre et la description de chaque exercice pour vérifier la compatibilité
+   - En cas de doute, privilégiez la sécurité et choisissez un exercice alternatif
+
+Directives pour la création du programme :
+
+1. Créez un programme d'entraînement avec le nombre exact de jours spécifié dans trainingFrequency.
+
+2. Pour chaque jour d'entraînement :
+   - Choisissez un focus approprié (par exemple, haut du corps, bas du corps, full body, cardio, etc.)
+   - Sélectionnez 5 à 8 exercices appropriés pour ce focus
+   - Vérifiez que chaque exercice sélectionné peut être réalisé avec les équipements disponibles
+   - Donnez un nom descriptif et motivant à la séance du jour
+
+3. Assurez-vous que le programme global est équilibré et correspond à l'objectif de l'utilisateur :
+   - Pour "REDESSINER SA SILHOUETTE" : Concentrez-vous sur le renforcement musculaire et la définition
+   - Pour "RESTER EN FORME" : Créez un mélange équilibré de cardio, force et flexibilité
+
+4. Adaptez la difficulté et la variété des exercices au niveau de l'utilisateur
+
+Format de réponse :
+Fournissez votre réponse au format JSON suivant :
 {
-  "name": "Program Name (descriptive)",
-  "description": "Brief program description (2-3 sentences)",
+  "name": string,
+  "description": string,
   "trainingDays": [
     {
-      "dayNumber": 1,
-      "name": "Day Name (e.g., 'Upper Body Push')",
-      "exercises": [
-        {
-          "exerciseId": <exercise_id>,
-          "setsPlanned": <number>,
-          "repsPerSet": <number>,
-          "restTimeBetweenSets": <seconds>
-        }
-      ]
+      "dayNumber": number,
+      "name": string,
+      "exerciseIds": [number, number, ...]
     }
   ]
 }
 
-**EXERCISE SELECTION GUIDELINES:**
-- Beginner: 3-4 sets, 10-12 reps, 60-90 seconds rest, simpler exercises
-- Intermediate: 3-5 sets, 8-12 reps, 60 seconds rest, moderate complexity
-- Advanced: 4-6 sets, 6-12 reps, 45-90 seconds rest, complex movements
+- "name" est une chaîne courte (max 50 caractères) décrivant le programme complet.
+- "description" explique brièvement comment le programme répond à l'objectif et au niveau de l'utilisateur.
+- "trainingDays" contient exactement trainingFrequency éléments.
+  - "dayNumber" commence à 1 et représente le jour d'entraînement.
+  - "name" décrit la séance.
+  - "exerciseIds" liste les ID des exercices choisis (compatibles avec l'équipement disponible).
 
-**TRAINING SPLIT GUIDELINES:**
-- 3 days/week: Full body or Upper/Lower/Full
-- 4 days/week: Upper/Lower split
-- 5 days/week: Push/Pull/Legs + accessories
-
-Be specific with exercise selection based on equipment availability and target zones.
-"""
+Assurez-vous que la réponse est strictement au format JSON ci-dessus."""
 
 
 def check_user_has_training_program(user_id: str) -> bool:
@@ -194,7 +226,8 @@ def select_exercises_with_ai(
                 "description": ex.get("description", ""),
                 "level": ex.get("level", ""),
                 "category": ex.get("category", ""),
-                "tags": ex.get("tags", []) or []
+                "tags": ex.get("tags", []) or [],
+                "equipments": ex.get("equipments", []) or [],
             })
 
         # Build user parameters
@@ -223,8 +256,41 @@ def select_exercises_with_ai(
             max_tokens=4096
         )
 
-        # Parse response
-        result = json.loads(response.choices[0].message.content)
+        # Parse and normalize response
+        raw_content = response.choices[0].message.content
+        result = json.loads(raw_content)
+        training_days = result.get("trainingDays") or []
+
+        for day in training_days:
+            exercise_ids = day.get("exerciseIds") or []
+            exercises = day.get("exercises") or []
+
+            # Normalize exercise IDs to integers when possible
+            normalized_ids: List[Any] = []
+            for eid in exercise_ids:
+                try:
+                    normalized_ids.append(int(eid))
+                except (TypeError, ValueError):
+                    normalized_ids.append(eid)
+            if normalized_ids:
+                day["exerciseIds"] = normalized_ids
+
+            if exercise_ids and not exercises:
+                # Expand compact exerciseIds list into detailed exercise objects for compatibility
+                expanded = []
+                for index, eid in enumerate(normalized_ids, start=1):
+                    expanded.append({
+                        "exerciseId": eid,
+                        "setsPlanned": 3,
+                        "repsPerSet": 10,
+                        "restTimeBetweenSets": 45,
+                        "orderInDay": index,
+                    })
+                day["exercises"] = expanded
+            elif exercises:
+                for index, exercise in enumerate(exercises, start=1):
+                    exercise.setdefault("orderInDay", index)
+
         logger.info(f"✅ AI generated program: {result.get('name', 'Unknown')}")
 
         return result

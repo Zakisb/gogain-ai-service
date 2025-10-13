@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
+import time
 import asyncio
 import json
 from typing import List, Dict, Any, Union, Optional
@@ -699,6 +700,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
 
     async def stream_generator():
         try:
+            req_start_ts = time.perf_counter()
             user_id = str(request.userId)
             user_message = request.message
             history = request.conversationHistory or []
@@ -719,8 +721,11 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             training_snapshot = training_program_summary.get("snapshot")
 
             # Initialize LLM
-            temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.7
-            llm = OpenAI(model=DEFAULT_MODEL, temperature=temp)
+            temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.6
+            # Cap tokens for QA-style explanatory turns to keep latency low
+            # We pass the same llm instance to all agents; QA responses are typically
+            # shorter, so a lower max_tokens helps prevent long completions.
+            llm = OpenAI(model=DEFAULT_MODEL, temperature=temp, max_tokens=600)
 
             # Set user_id in thread-local storage for tools to access programmatically
             from app.knowledge.enhanced_assessment_tools import set_user_context
@@ -794,6 +799,9 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
 
             # Prefer streaming when available
             if hasattr(workflow, 'run_with_streaming'):
+                first_token_ts: Optional[float] = None
+                token_chunks: int = 0
+                streamed: bool = False
                 def coerce_chunk_to_text(chunk) -> str:
                     if chunk is None:
                         return ""
@@ -855,7 +863,12 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         for piece in pieces:
                             if not piece:
                                 continue
+                            # First-token timestamp
+                            if first_token_ts is None:
+                                first_token_ts = time.perf_counter()
+                                streamed = True
                             collected_response += piece
+                            token_chunks += 1
                             yield emit_vc_event("text_delta", piece) + "\n\n"  # Extra padding for Docker flushing
                             # Force immediate flush
                             await asyncio.sleep(0)
@@ -902,6 +915,20 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # DUAL HISTORY SYSTEM: Check which agent handled the request
             handling_agent = workflow.get_current_agent() if hasattr(workflow, 'get_current_agent') else None
             logger.info(f"🎯 Request handled by agent: {handling_agent}")
+
+            # --- Lightweight per-turn timing logs ---
+            total_elapsed = time.perf_counter() - req_start_ts
+            if 'first_token_ts' in locals() and first_token_ts is not None:
+                ttfb = first_token_ts - req_start_ts
+                logger.info(
+                    "⏱️ Turn timings | user=%s agent=%s streamed=%s ttfb=%.2fs total=%.2fs chunks=%d",
+                    user_id, handling_agent, bool(streamed), ttfb, total_elapsed, token_chunks,
+                )
+            else:
+                logger.info(
+                    "⏱️ Turn timings | user=%s agent=%s streamed=%s total=%.2fs",
+                    user_id, handling_agent, False, total_elapsed,
+                )
 
             # Unwrap pain agent structured JSON responses if needed
             if handling_agent == "EnhancedPainAssessmentAgent":
