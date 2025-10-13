@@ -1417,38 +1417,6 @@ def create_llm_driven_rag_tool() -> FunctionTool:
         hyde_text = hyde_snippet.strip() if isinstance(hyde_snippet, str) else ""
         user_id = _user_id_context.get()
 
-        # Store body_region in pain session (used for queue context injection)
-        try:
-            import asyncio
-            from app.core.cache import set_pain_session_body_region
-
-            # Run async function in sync context
-            loop = None
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            if loop.is_running():
-                # If loop is already running, schedule coroutine as task
-                asyncio.create_task(set_pain_session_body_region(user_id, body_region))
-            else:
-                # If loop not running, run coroutine synchronously
-                loop.run_until_complete(set_pain_session_body_region(user_id, body_region))
-        except Exception as e:
-            logger.warning(f"Failed to store body_region in session: {e}")
-
-        # Persist submitted queries immediately for observability
-        _store_queries_in_queue(
-            user_id=user_id,
-            body_region=body_region,
-            queries=normalized_queries,
-            hyde_snippet=hyde_text,
-            conversation_history=conversation_history,
-            source=query_source,
-        )
-
         retrieval_inputs = normalized_queries[:]
         if hyde_text:
             retrieval_inputs.append(hyde_text)
@@ -1462,6 +1430,38 @@ def create_llm_driven_rag_tool() -> FunctionTool:
         def _background_worker():
             """Execute RAG in a separate thread and refresh the queue."""
             try:
+                # Store body_region in pain session (used for queue context injection) - INSIDE background thread
+                try:
+                    import asyncio
+                    from app.core.cache import set_pain_session_body_region
+
+                    # Run async function in sync context
+                    loop = None
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+
+                    if loop.is_running():
+                        # If loop is already running, schedule coroutine as task
+                        asyncio.create_task(set_pain_session_body_region(user_id, body_region))
+                    else:
+                        # If loop not running, run coroutine synchronously
+                        loop.run_until_complete(set_pain_session_body_region(user_id, body_region))
+                except Exception as e:
+                    logger.warning(f"Failed to store body_region in session: {e}")
+
+                # Persist submitted queries for observability - INSIDE background thread
+                _store_queries_in_queue(
+                    user_id=user_id,
+                    body_region=body_region,
+                    queries=normalized_queries,
+                    hyde_snippet=hyde_text,
+                    conversation_history=conversation_history,
+                    source=query_source,
+                )
+
                 logger.info(
                     "🚀 [retrieve_with_llm_queries] Background RAG started for user=%s region=%s",
                     user_id,

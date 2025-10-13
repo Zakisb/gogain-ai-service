@@ -30,6 +30,7 @@ from app.core.cache import (
     cache_user_profile,
     get_cached_training_program,
     cache_user_training_program,
+    set_pain_session_body_region,
 )
 from app.core.database import get_user_profile, get_user_training_program_overview
 
@@ -103,6 +104,39 @@ async def end_pain_agent_session(user_id: str):
 async def is_pain_agent_session_active(user_id: str) -> bool:
     """Check if pain agent session is active for user (Redis-backed)."""
     return await cache_is_pain_agent_session_active(user_id)
+
+
+def extract_body_region_from_message(message: str) -> str:
+    """Extract body region from user message using simple semantic matching.
+
+    Returns the body region (e.g., 'dos', 'epaule', 'genou') or 'general' if not found.
+    """
+    message_lower = message.lower()
+
+    # Map common pain location phrases to body regions
+    region_mappings = {
+        'dos': ['dos', 'lombaire', 'colonne', 'vertebr', 'rachis'],
+        'epaule': ['epaule', 'épaule', 'shoulder'],
+        'genou': ['genou', 'rotule', 'knee'],
+        'cou': ['cou', 'cervical', 'nuque', 'neck'],
+        'hanche': ['hanche', 'hip'],
+        'cheville': ['cheville', 'ankle'],
+        'poignet': ['poignet', 'wrist'],
+        'coude': ['coude', 'elbow'],
+        'pied': ['pied', 'foot'],
+        'main': ['main', 'hand'],
+    }
+
+    # Check for matches
+    for region, keywords in region_mappings.items():
+        for keyword in keywords:
+            if keyword in message_lower:
+                logger.info(f"🔍 Extracted body_region='{region}' from message (keyword: '{keyword}')")
+                return region
+
+    # Default to 'general' if no specific region found
+    logger.info("🔍 No specific body_region found in message, defaulting to 'general'")
+    return 'general'
 
 
 async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -341,7 +375,15 @@ def _format_training_program_context(summary: Dict[str, Any]) -> Optional[str]:
     return "\n".join(lines)
 
 
-def build_message_array_context(history, current_message, user_profile=None, user_memories=None, limit=3, include_memories=True):
+def build_message_array_context(
+    history,
+    current_message,
+    user_profile=None,
+    user_memories=None,
+    limit=3,
+    include_memories=True,
+    training_snapshot=None,
+):
     """Build universal message array context that works with all LLM providers."""
     messages = []
 
@@ -369,6 +411,13 @@ def build_message_array_context(history, current_message, user_profile=None, use
                 "role": "system",
                 "content": system_context
             })
+
+    # Add training program snapshot (if available)
+    if training_snapshot:
+        messages.append({
+            "role": "system",
+            "content": training_snapshot
+        })
 
     # Add conversation history (respecting limit)
     if history:
@@ -755,6 +804,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                 user_memories=[],
                 limit=10,  # Router needs last 8 turns to maintain workflow context (training program creation, pain assessment)
                 include_memories=False,
+                training_snapshot=training_snapshot,
             )
             routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
 
@@ -791,7 +841,10 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     user_memories=user_memories,  # Inject cached memories for QA agent
                     limit=20,  # Reduced from 40 for faster processing
                     include_memories=True,  # Enable memory injection for QA agent
+                    training_snapshot=training_snapshot,
                 )
+
+            # No router guardrails; rely on agent prompts for handoff behavior
 
             agent_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
 
@@ -954,6 +1007,11 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                 if not await is_pain_agent_session_active(user_id):
                     logger.info(f"🔴 Starting new pain session for {user_id}")
                     await start_pain_agent_session(user_id)
+
+                    # Extract body_region from user message and store it
+                    body_region = extract_body_region_from_message(user_message)
+                    await set_pain_session_body_region(user_id, body_region)
+                    logger.info(f"🔍 Extracted and stored body_region='{body_region}' for new pain session")
 
                     # 🧠 NOTE: Initial RAG retrieval is now the pain agent's responsibility
                     # The pain agent will call retrieve_with_llm_queries() tool after understanding

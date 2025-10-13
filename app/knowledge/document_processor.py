@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import logging
 import math
+import time
 
 from llama_index.core import SimpleDirectoryReader, Document
 from llama_index.core.node_parser import (
@@ -39,6 +40,12 @@ class DocumentProcessor:
         self._setup_parsers()
         self._setup_extractors()
         self._setup_quote_classifier()
+        self._reset_quote_stats()
+
+    def _reset_quote_stats(self) -> None:
+        """Reset quote-classification instrumentation counters."""
+        self._quote_segment_count: int = 0
+        self._quote_classification_ms: float = 0.0
 
     def _setup_quote_classifier(self) -> None:
         """Initialize semantic quote classifier using embedding centroids.
@@ -192,10 +199,13 @@ class DocumentProcessor:
         patient_quotes: List[str] = []
 
         if quoted_segments:
+            classify_start = time.monotonic()
             if self._quote_classifier is not None:
                 labels = self._quote_classifier.classify_batch(quoted_segments)
             else:
                 labels = [_QuoteClassifier.LABEL_QUESTION] * len(quoted_segments)
+            self._quote_segment_count += len(quoted_segments)
+            self._quote_classification_ms += (time.monotonic() - classify_start) * 1000.0
 
             for segment, label in zip(quoted_segments, labels):
                 normalized = segment.strip()
@@ -250,7 +260,23 @@ class DocumentProcessor:
             List of processed nodes
         """
         documents = self.load_document(file_path)
-        return self.process_documents(documents)
+        self._reset_quote_stats()
+        embed_calls_before = (
+            self._quote_classifier.embed_calls if self._quote_classifier is not None else 0
+        )
+        nodes = self.process_documents(documents)
+        embed_calls_after = (
+            self._quote_classifier.embed_calls if self._quote_classifier is not None else embed_calls_before
+        )
+        if self._quote_segment_count:
+            logger.info(
+                "Quote classifier processed %d quoted segments for %s via %d embedding calls (%.2f ms)",
+                self._quote_segment_count,
+                Path(file_path).name,
+                embed_calls_after - embed_calls_before,
+                self._quote_classification_ms,
+            )
+        return nodes
 
 
 class _QuoteClassifier:
@@ -266,10 +292,15 @@ class _QuoteClassifier:
 
     def __init__(self, embed_model) -> None:
         self._embed_model = embed_model
+        self._embed_calls = 0
         self._centroids = self._build_centroids()
 
     def classify_batch(self, texts: Iterable[str]) -> List[str]:
         return [self._classify_single(text) for text in texts]
+    
+    @property
+    def embed_calls(self) -> int:
+        return self._embed_calls
 
     def _build_centroids(self) -> Dict[str, List[float]]:
         prototypes: Dict[str, List[str]] = {
@@ -318,7 +349,9 @@ class _QuoteClassifier:
         return best_label
 
     def _embed(self, text: str) -> List[float]:
-        return self._embed_model.get_text_embedding(text)
+        vector = self._embed_model.get_text_embedding(text)
+        self._embed_calls += 1
+        return vector
 
     @staticmethod
     def _mean_vector(vectors: List[List[float]]) -> List[float]:

@@ -4,6 +4,7 @@
 import sys
 import os
 import glob
+import logging
 from pathlib import Path
 sys.path.append(os.path.dirname(__file__))
 
@@ -16,6 +17,13 @@ from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
 import json
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
 
 def embed_with_enhanced_hierarchical():
     """Embed pain documents using enhanced hierarchical chunker."""
