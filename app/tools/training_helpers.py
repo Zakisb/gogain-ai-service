@@ -334,7 +334,7 @@ def create_user_training_program(
                 """
                 INSERT INTO "UserTrainingProgram"
                 (name, description, "userId", "focusId", duration, frequency, "startDate", "endDate")
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp)
                 RETURNING id
                 """,
                 (
@@ -344,8 +344,8 @@ def create_user_training_program(
                     focus_id,
                     duration_weeks,
                     frequency,
-                    start_date,
-                    end_date,
+                    start_date.isoformat(),  # Convert date to string
+                    end_date.isoformat(),    # Convert date to string
                 ),
             )
 
@@ -363,14 +363,14 @@ def create_user_training_program(
                     """
                     INSERT INTO "UserTrainingDay"
                     ("userProgramId", "dayNumber", name, date, status)
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s::timestamp, %s::"TrainingStatus")
                     RETURNING id
                     """,
                     (
                         program_id,
                         day_number,
                         day_name,
-                        current_date,
+                        current_date.isoformat(),  # Convert date to string
                         "PLANNED",
                     ),
                 )
