@@ -1,0 +1,1864 @@
+generator client {
+  provider  = "prisma-client-py"
+  interface = "asyncio"
+  enable_experimental_decimal = true             
+
+}
+
+datasource db {
+  provider     = "postgresql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+// Recipe bookmarks
+model RecipeBookmark {
+  id        Int      @id @default(autoincrement())
+  userId    Int // References User id
+  recipeId  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user   User   @relation(fields: [userId], references: [id])
+  recipe Recipe @relation(fields: [recipeId], references: [id])
+
+  // Ensure a user can't bookmark the same recipe twice
+  @@unique([userId, recipeId])
+  // Indexes for better query performance
+  @@index([userId])
+  @@index([recipeId])
+}
+
+// Exercise bookmarksd
+model ExerciseBookmark {
+  id         Int      @id @default(autoincrement())
+  userId     Int // References User id
+  exerciseId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id])
+  exercise Exercise @relation(fields: [exerciseId], references: [id])
+
+  // Ensure a user can't bookmark the same exercise twice
+  @@unique([userId, exerciseId])
+  // Indexes for better query performance
+  @@index([userId])
+  @@index([exerciseId])
+}
+
+
+model CoachingSession {
+  id              Int                          @id @default(autoincrement())
+  organizationId  Int
+  coachId         Int
+  name            String
+  description     String
+  date            DateTime
+  startTime       DateTime
+  endTime         DateTime
+  maxParticipants Int
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+  coach           User                         @relation("Coach", fields: [coachId], references: [id])
+  participants    CoachingSessionParticipant[]
+
+  @@index([coachId])
+  @@index([organizationId])
+}
+
+model CoachingSessionParticipant {
+  id                Int             @id @default(autoincrement())
+  coachingSessionId Int
+  userId            Int
+  joinedAt          DateTime        @default(now())
+  coachingSession   CoachingSession @relation(fields: [coachingSessionId], references: [id])
+  user              User            @relation(fields: [userId], references: [id])
+
+  @@index([coachingSessionId])
+  @@index([userId])
+}
+
+
+model Club {
+  id             Int           @id @default(autoincrement())
+  name           String
+  description    String?
+  isOpen         Boolean       @default(false)
+  creatorId      Int?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  imageId        Int?
+  deletedAt      DateTime?
+  isDeleted      Boolean       @default(false)
+  creator        User?         @relation("ClubCreator", fields: [creatorId], references: [id])
+  members        ClubMember[]
+  challenges     Challenge[]
+  teams          ClubTeam[]
+  image          Image?        @relation(fields: [imageId], references: [id])
+  organizationId Int? // Add this field
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([creatorId])
+  @@index([imageId])
+}
+
+model ClubMember {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  clubId       Int
+  joinedAt     DateTime? @db.Timestamp(6)
+  isActive     Boolean?  @default(true)
+  leftAt       DateTime? @db.Timestamp(6)
+  showClubNews Boolean?  @default(false)
+  invitedAt    DateTime? @db.Timestamp(6)
+  invitedById  Int?
+  user         User      @relation(fields: [userId], references: [id])
+  club         Club      @relation(fields: [clubId], references: [id])
+  invitedBy    User?     @relation("Invitations", fields: [invitedById], references: [id])
+
+  @@unique([userId, clubId])
+  @@index([clubId])
+  @@index([invitedById])
+  @@index([userId])
+}
+
+model ClubTeam {
+  id           Int                        @id @default(autoincrement())
+  name         String?
+  description  String?
+  clubId       Int
+  imageId      Int?
+  creatorId    Int?
+  isDeleted    Boolean                    @default(false)
+  isActive     Boolean                    @default(true)
+  createdat    DateTime?                  @db.Timestamp(6)
+  deletedat    DateTime?                  @db.Timestamp(6)
+  updatedat    DateTime?                  @db.Timestamp(6)
+  club         Club                       @relation(fields: [clubId], references: [id])
+  creator      User?                      @relation("ClubTeamCreator", fields: [creatorId], references: [id])
+  members      ClubTeamMember[]
+  participants ChallengeTeamParticipant[]
+  image        Image?                     @relation(fields: [imageId], references: [id])
+
+  @@index([clubId])
+  @@index([creatorId])
+  @@index([imageId])
+}
+
+model ClubTeamMember {
+  id       Int       @id @default(autoincrement())
+  userId   Int
+  teamId   Int
+  joinedAt DateTime  @default(now())
+  isActive Boolean   @default(true)
+  leftAt   DateTime?
+  user     User      @relation(fields: [userId], references: [id])
+  team     ClubTeam  @relation(fields: [teamId], references: [id])
+
+  @@unique([userId, teamId])
+  @@index([userId])
+  @@index([teamId])
+}
+
+model Challenge {
+  id                     Int                         @id @default(autoincrement())
+  name                   String
+  description            String?
+  creatorId              Int?
+  clubId                 Int?
+  isPublic               Boolean                     @default(false)
+  goalTypeId             Int
+  goalValue              Float?
+  startDate              DateTime
+  endDate                DateTime
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  competitionTypeId      Int
+  imageId                Int?
+  prizeColorScheme       String?
+  prizeEngraving         String?
+  prizeTypeId            Int?
+  isDeleted              Boolean                     @default(false)
+  milestoneTypeId        Int?
+  statusId               Int?
+  creator                User?                       @relation("ChallengeCreator", fields: [creatorId], references: [id])
+  club                   Club?                       @relation(fields: [clubId], references: [id])
+  individualParticipants ChallengeParticipant[]      @relation("IndividualParticipants")
+  teamParticipants       ChallengeTeamParticipant[]
+  news                   ChallengeNews[]
+  goalType               ChallengeGoalType           @relation(fields: [goalTypeId], references: [id])
+  competitionType        ChallengeCompetitionType    @relation(fields: [competitionTypeId], references: [id])
+  prizeType              ChallengePrizeType?         @relation(fields: [prizeTypeId], references: [id])
+  image                  Image?                      @relation(fields: [imageId], references: [id])
+  milestoneType          ChallengeGoalTypeMilesones? @relation(fields: [milestoneTypeId], references: [id])
+  status                 ChallengeStatus?            @relation(fields: [statusId], references: [id])
+
+  @@index([creatorId])
+  @@index([clubId])
+  @@index([goalTypeId])
+  @@index([competitionTypeId])
+  @@index([imageId])
+  @@index([prizeTypeId])
+  @@index([milestoneTypeId])
+  @@index([statusId])
+}
+
+model ChallengeStatus {
+  id          Int         @id @default(autoincrement())
+  name        String      @unique
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  challenges  Challenge[]
+}
+
+model ChallengeGoalType {
+  id          Int                          @id @default(autoincrement())
+  name        String                       @unique
+  description String?
+  createdAt   DateTime                     @default(now())
+  updatedAt   DateTime                     @updatedAt
+  value       String                       @unique
+  challenges  Challenge[]
+  milestones  ChallengeGoalTypeMilesones[]
+}
+
+model ChallengeGoalTypeMilesones {
+  id              Int               @id @default(autoincrement())
+  description     String
+  measurementType String
+  goalTypeId      Int
+  goalType        ChallengeGoalType @relation(fields: [goalTypeId], references: [id])
+  challenges      Challenge[]
+
+  @@index([goalTypeId])
+}
+
+model ChallengePrizeType {
+  id          Int         @id @default(autoincrement())
+  value       String      @unique
+  displayName String
+  challenges  Challenge[]
+}
+
+model ChallengeCompetitionType {
+  id          Int         @id @default(autoincrement())
+  value       String      @unique
+  name        String      @unique
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  challenges  Challenge[]
+}
+
+model ChallengeParticipant {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  challengeId Int
+  progress    Float     @default(0)
+  joinedAt    DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id])
+  challenge   Challenge @relation("IndividualParticipants", fields: [challengeId], references: [id])
+
+  @@unique([userId, challengeId])
+  @@index([userId])
+  @@index([challengeId])
+}
+
+model ChallengeTeamParticipant {
+  id          Int       @id @default(autoincrement())
+  teamId      Int
+  challengeId Int
+  progress    Float     @default(0)
+  joinedAt    DateTime  @default(now())
+  team        ClubTeam  @relation(fields: [teamId], references: [id])
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+
+  @@unique([teamId, challengeId])
+  @@index([teamId])
+  @@index([challengeId])
+}
+
+model ChallengeNews {
+  id            Int       @id @default(autoincrement())
+  challengeId   Int
+  title         String
+  content       String
+  type          NewsType
+  relatedUserId Int?
+  createdAt     DateTime  @default(now())
+  challenge     Challenge @relation(fields: [challengeId], references: [id])
+  relatedUser   User?     @relation(fields: [relatedUserId], references: [id])
+
+  @@index([challengeId])
+  @@index([relatedUserId])
+}
+
+enum NewsType {
+  ACHIEVEMENT
+  MILESTONE
+  WINNER_ANNOUNCEMENT
+  CHALLENGE_START
+  CHALLENGE_END
+}
+
+enum CompetitionType {
+  INDIVIDUAL
+  TEAM
+}
+
+enum GoalType {
+  PROGRESS
+  MOBILITY
+}
+
+
+model DietPlan {
+  id             Int        @id @default(autoincrement())
+  userId         Int
+  name           String?
+  description    String?
+  startDate      DateTime?
+  endDate        DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  dailyCalories  Float?
+  dailyCarbs     Float?
+  dailyFat       Float?
+  dailyProtein   Float?
+  targetCalories Float?
+  targetCarbs    Float?
+  targetFat      Float?
+  targetProtein  Float?
+  user           User       @relation(fields: [userId], references: [id])
+  mealPlans      MealPlan[]
+
+  @@index([userId])
+}
+
+model MealPlan {
+  id               Int             @id @default(autoincrement())
+  dietPlanId       Int
+  name             String
+  timeOfDay        DateTime
+  orderInDay       Int
+  carbs            Float?
+  fat              Float?
+  mealType         MealType
+  protein          Float?
+  mealPlanRecipeId Int?
+  vegetables       Json?
+  description      String?
+  dietPlan         DietPlan        @relation(fields: [dietPlanId], references: [id])
+  mealPlanFoods    MealPlanFood[]
+  mealPlanRecipe   MealPlanRecipe? @relation(fields: [mealPlanRecipeId], references: [id])
+
+  @@index([dietPlanId])
+  @@index([mealPlanRecipeId])
+}
+
+model Food {
+  id                Int            @id @default(autoincrement())
+  name              String
+  description       String
+  caloriesPer100g   Float
+  proteinPer100g    Float
+  carbsPer100g      Float
+  fatPer100g        Float
+  unitOfMeasurement String
+  mealPlanFoods     MealPlanFood[]
+
+  @@index([name])
+}
+
+model MealPlanFood {
+  id         Int      @id @default(autoincrement())
+  mealPlanId Int
+  foodId     Int
+  quantity   Float
+  mealPlan   MealPlan @relation(fields: [mealPlanId], references: [id])
+  food       Food     @relation(fields: [foodId], references: [id])
+
+  @@index([mealPlanId])
+  @@index([foodId])
+}
+
+model MealPlanRecipe {
+  id              Int        @id @default(autoincrement())
+  steps           String[]
+  difficultyLevel String?
+  preparationTime String?
+  tips            String?
+  mealPlans       MealPlan[]
+}
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  SNACK
+  DINNER
+}
+
+
+model Exercise {
+  id                   Int                           @id @default(autoincrement())
+  description          String?
+  videoUrl             String?
+  categoryId           Int
+  createdAt            DateTime                      @default(now())
+  deleted              Boolean                       @default(false)
+  duration             Int?
+  embedCode            String
+  levelId              Int
+  posterUrl            String?
+  state                String                        @default("inspecting")
+  thumbnailUrl         String
+  title                String
+  videoExternalId      String                        @unique
+  videoSize            Int
+  category             ExerciseCategory              @relation(fields: [categoryId], references: [id])
+  level                Level                         @relation(fields: [levelId], references: [id])
+  templateExercises    TrainingDayExerciseTemplate[]
+  userProgramExercises UserProgramExercise[]
+  equipments           ExerciseEquipment[]
+  tags                 ExerciseTag[]
+  exerciseLogs         ExerciseLog[]
+  collections          CollectionExercise[]
+  bookmarks            ExerciseBookmark[]
+
+  @@index([categoryId])
+  @@index([levelId])
+}
+
+model Collections {
+  id          Int                  @id @default(autoincrement())
+  name        String
+  description String
+  createdBy   String?             // Make it optional for existing records
+  exercises   CollectionExercise[]
+}
+
+model CollectionExercise {
+  id           Int         @id @default(autoincrement())
+  collectionId Int
+  exerciseId   Int
+  order        Int?
+  collection   Collections @relation(fields: [collectionId], references: [id])
+  exercise     Exercise    @relation(fields: [exerciseId], references: [id])
+
+  @@unique([collectionId, exerciseId])
+  @@index([collectionId])
+  @@index([exerciseId])
+}
+
+model Level {
+  id          Int        @id @default(autoincrement())
+  description String
+  value       String     @unique
+  exercises   Exercise[]
+}
+
+model ExerciseCategory {
+  id          Int        @id @default(autoincrement())
+  value       String     @unique
+  description String
+  exercises   Exercise[]
+}
+
+model Equipment {
+  id          Int                 @id @default(autoincrement())
+  description String
+  value       String              @unique
+  exercises   ExerciseEquipment[]
+}
+
+model ExerciseEquipment {
+  id          Int       @id @default(autoincrement())
+  exerciseId  Int
+  equipmentId Int
+  exercise    Exercise  @relation(fields: [exerciseId], references: [id])
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  @@index([exerciseId])
+  @@index([equipmentId])
+}
+
+model Tag {
+  id        Int           @id @default(autoincrement())
+  name      String        @unique
+  exercises ExerciseTag[]
+}
+
+model ExerciseTag {
+  id         Int      @id @default(autoincrement())
+  exerciseId Int
+  tagId      Int
+  exercise   Exercise @relation(fields: [exerciseId], references: [id])
+  tag        Tag      @relation(fields: [tagId], references: [id])
+
+  @@index([exerciseId])
+  @@index([tagId])
+}
+
+
+model HealthDataProvider {
+  id           Int          @id @default(autoincrement())
+  code         String       @unique
+  name         String
+  identifier   String       @unique
+  platform     Platform
+  providerType ProviderType
+  isActive     Boolean      @default(true)
+
+  // Relations with consistent naming
+  activities              UserActivity[]
+  userHealthDataProviders UserHealthDataProvider[]
+  sdkConnection           SDKConnection[]
+  dailyHealthMetrics      UserDailyHealthMetric[]
+}
+
+model UserHealthDataProvider {
+  id                   Int        @id @default(autoincrement())
+  userId               Int
+  healthDataProviderId Int
+  lastSync             DateTime
+  syncAnchor           String?
+  status               SyncStatus @default(NOT_CONFIGURED)
+
+  user               User               @relation(fields: [userId], references: [id])
+  healthDataProvider HealthDataProvider @relation(fields: [healthDataProviderId], references: [id])
+
+  @@unique([userId, healthDataProviderId])
+  @@index([userId])
+  @@index([healthDataProviderId])
+}
+
+model HealthDataRecordingMethod {
+  id         Int            @id @default(autoincrement())
+  code       String         @unique
+  name       String
+  isActive   Boolean        @default(true)
+  // Relations
+  activities UserActivity[]
+}
+
+model SDKConnection {
+  id                   Int           @id @default(autoincrement())
+  userId               Int
+  healthDataProviderId Int
+  lastSync             DateTime?
+  status               SDKAuthStatus
+  accessToken          String?
+  refreshToken         String?
+  expiresAt            DateTime?
+
+  user               User               @relation(fields: [userId], references: [id])
+  healthDataProvider HealthDataProvider @relation(fields: [healthDataProviderId], references: [id])
+
+  @@unique([userId, healthDataProviderId])
+  @@index([userId])
+  @@index([healthDataProviderId])
+}
+
+enum ProviderType {
+  HEALTH_PLATFORM_APP
+  DIRECT_SDK
+}
+
+enum SyncStatus {
+  NOT_CONFIGURED
+  DENIED
+  GRANTED
+  ERROR
+}
+
+enum SDKAuthStatus {
+  NOT_CONFIGURED
+  DISCONNECTED
+  CONNECTED
+  FAILED
+}
+
+enum Platform {
+  IOS
+  ANDROID
+}
+
+
+model Image {
+  id            Int              @id @default(autoincrement())
+  url           String           @unique
+  publicId      String           @unique
+  width         Int?
+  height        Int?
+  format        String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  displayName   String?
+  originalName  String?
+  categoryId    Int
+  defaultType   DefaultImageType @default(NONE) // Here
+  clubs         Club[]
+  category      ImageCategory    @relation(fields: [categoryId], references: [id])
+  clubTeams     ClubTeam[]
+  users         User[]
+  challenges    Challenge[]
+  recipes       Recipe[]
+  organizations Organization[]
+
+  @@index([categoryId])
+}
+
+model ImageCategory {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  description String?
+  images      Image[]
+}
+
+enum DefaultImageType {
+  USER_AVATAR
+  ORGANIZATION_AVATAR
+  NONE
+}
+
+
+model Question {
+  id                 Int              @id @default(autoincrement())
+  question           String
+  isArchived         Boolean          @default(false)
+  questionCategoryId Int
+  questionCategory   QuestionCategory @relation(fields: [questionCategoryId], references: [id])
+  questionAnswers    QuestionAnswer[]
+
+  @@index([questionCategoryId])
+}
+
+model UserQuestionAnswer {
+  id               Int            @id @default(autoincrement())
+  userId           Int
+  questionAnswerId Int
+  user             User           @relation(fields: [userId], references: [id])
+  questionAnswer   QuestionAnswer @relation(fields: [questionAnswerId], references: [id])
+
+  @@index([userId])
+  @@index([questionAnswerId])
+}
+
+model QuestionAnswer {
+  id          Int                  @id @default(autoincrement())
+  questionId  Int
+  answerId    Int
+  question    Question             @relation(fields: [questionId], references: [id])
+  answer      Answer               @relation(fields: [answerId], references: [id])
+  userAnswers UserQuestionAnswer[]
+}
+
+model Answer {
+  id              Int              @id @default(autoincrement())
+  isArchived      Boolean          @default(false)
+  text            String
+  description     String?
+  questionAnswers QuestionAnswer[]
+}
+
+model QuestionCategory {
+  id        Int        @id @default(autoincrement())
+  category  String
+  value     String     @unique
+  questions Question[]
+}
+
+
+model Thread {
+  id        String   @id @default(uuid())
+  userId    Int      @unique
+  openaiId  String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  isActive  Boolean  @default(true)
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+
+model Organization {
+  id                Int      @id @default(autoincrement())
+  name              String
+  email             String?
+  deleted           Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  mainOrg           Boolean  @default(false)
+  numberOfEmployees Int      @default(0)
+  industryId        Int?     @default(1)
+  domain            String?
+  industry             Industry?           @relation(fields: [industryId], references: [id])
+  users                User[]
+  statusId             Int?
+  status               OrganizationStatus? @relation(fields: [statusId], references: [id])
+  representativeId     Int?
+  representative       User?               @relation("Representative", fields: [representativeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  logoId               Int?
+  logoImage            Image?              @relation(fields: [logoId], references: [id])
+  organizationInviteId Int?                @unique
+  organizationInvite   OrganizationInvite? @relation(fields: [organizationInviteId], references: [id])
+  representativeEmail  String?
+  clubs                Club[] // Add this line for clubs relation
+  subscriptions        Subscription[]
+  paymentMethods        PaymentMethod[]
+  
+  @@index([logoId])
+  @@index([representativeId])
+  @@index([statusId])
+  @@index([industryId])
+}
+
+model OrganizationStatus {
+  id            Int            @id @default(autoincrement())
+  code          String         @unique
+  displayName   String         @unique
+  description   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  organizations Organization[]
+}
+
+model OrganizationInvite {
+  id           Int                    @id @default(autoincrement())
+  organization Organization? // Add this line to complete the relation
+  inviteType   OrganizationInviteType @default(INBOUND)
+
+  // contact info
+  contactEmail     String
+  contactFirstName String?
+  contactLastName  String?
+  contactRoleId    Int?
+  contactRole      Role?   @relation("ContactRole", fields: [contactRoleId], references: [id])
+
+  organizationName String
+
+  employeeCount       Int
+  phoneNumber         String?
+  note                String?
+  statusId            Int?                      @default(1)
+  roleId              Int?
+  token               String?                   @unique
+  expiresAt           DateTime?
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+  industryId          Int?
+  industry            Industry?                 @relation(fields: [industryId], references: [id])
+  status              OrganizationInviteStatus? @relation(fields: [statusId], references: [id])
+  invitedBy           Int?
+  inviter             User?                     @relation("SentInvites", fields: [invitedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  // Contact Attempt
+  contactAttemptDate  DateTime?
+  contactAttemptNotes String?
+  contactStatusId     Int?
+  contactStatus       ContactStatus?            @relation(fields: [contactStatusId], references: [id])
+  callbackDate        DateTime? // Add this field for scheduled callbacks
+
+  // Representative
+
+  representativeRoleId Int?
+  representativeRole   Role?   @relation("RepresentativeRole", fields: [representativeRoleId], references: [id])
+  representativeEmail  String?
+
+  // Final Notes
+  finalNotes      String?
+  reviewDate      DateTime?
+  // Approval/Rejection
+  rejectionReason String?
+  rejectionDate   DateTime?
+
+  approvalDate DateTime?
+
+  @@index([contactStatusId])
+  @@index([invitedBy])
+  @@index([industryId])
+  @@index([statusId])
+  @@index([roleId])
+  @@index([contactRoleId])
+  @@index([representativeRoleId])
+}
+
+model Industry {
+  id            Int                  @id @default(autoincrement())
+  code          String               @unique
+  displayName   String               @unique
+  description   String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  //   organizations Organization[]
+  invites       OrganizationInvite[]
+  organizations Organization[]
+}
+
+model OrganizationInviteStatus {
+  id          Int                  @id @default(autoincrement())
+  code        String               @unique
+  displayName String               @unique
+  description String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  step        Int?                 @default(1)
+  isTerminal  Boolean              @default(false)
+  invites     OrganizationInvite[]
+}
+
+model ContactStatus {
+  id                   Int                  @id @default(autoincrement())
+  code                 String               @unique
+  displayName          String               @unique
+  description          String?
+  requiresCallbackDate Boolean              @default(false) // Add this to indicate which statuses need a date
+  invites              OrganizationInvite[]
+}
+
+enum OrganizationInviteType {
+  INBOUND
+  OUTBOUND
+}
+
+
+model Recipe {
+  id          Int                @id @default(autoincrement())
+  name        String
+  servings    Int                @default(1)
+  prepTime    Int?
+  cookTime    Int?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  imageId     Int?
+  typeId      Int?
+  ingredients RecipeIngredient[]
+  steps       RecipeStep[]
+  nutrition   RecipeNutrition?
+  image       Image?             @relation(fields: [imageId], references: [id])
+  type        RecipeType?        @relation(fields: [typeId], references: [id])
+  description String?
+  bookmarks   RecipeBookmark[]
+
+  @@index([imageId])
+  @@index([typeId])
+}
+
+model RecipeType {
+  id      Int      @id @default(autoincrement())
+  code    String   @unique
+  name    String
+  recipes Recipe[]
+}
+
+model Ingredient {
+  id                Int                @id @default(autoincrement())
+  name              String             @unique
+  nameEn            String?
+  category          String?
+  recipeIngredients RecipeIngredient[]
+}
+
+model RecipeIngredient {
+  id           Int        @id @default(autoincrement())
+  recipeId     Int
+  ingredientId Int
+  quantity     Float
+  unit         String
+  recipe       Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@unique([recipeId, ingredientId])
+  @@index([recipeId])
+  @@index([ingredientId])
+}
+
+model RecipeStep {
+  id          Int    @id @default(autoincrement())
+  recipeId    Int
+  stepNumber  Int
+  instruction String
+  recipe      Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, stepNumber])
+  @@index([recipeId])
+}
+
+model RecipeNutrition {
+  id          Int     @id @default(autoincrement())
+  recipeId    Int     @unique
+  proteins    Float
+  carbs       Float
+  fats        Float
+  calories    Float?
+  servingSize String?
+  recipe      Recipe  @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+}
+
+model Unit {
+  id         Int     @id @default(autoincrement())
+  name       String  @unique
+  shortName  String  @unique
+  type       String
+  baseUnit   String?
+  conversion Float?
+}
+
+
+model SeedHistory {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  status    String   @default("success")
+  error     String?
+  duration  Int?
+  file      String?
+  createdAt DateTime @default(now())
+}
+
+
+model Plan {
+  id            Int            @id @default(autoincrement())
+  code          String         @unique
+  name          String
+  description   String?
+  typeId        Int
+  type          PlanType       @relation(fields: [typeId], references: [id])
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  prices        PlanPrice[]
+  features      PlanFeature[]
+  trialDays     Int? // If all prices of this plan share same trial period
+  sortOrder     Int? // For pricing table display order
+  stripeProductId String? @unique
+  addons        PlanAddon[]
+  subscriptions Subscription[] 
+  isPopular     Boolean        @default(false)
+  revenueCatEntitlementCode String?
+  @@index([typeId])
+}
+
+model PlanType {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  plans       Plan[]
+}
+
+model PlanPrice {
+  id                    Int                 @id @default(autoincrement())
+  planId                Int
+  amount                Decimal
+  currency              String
+  planPricingIntervalId Int
+  planPricingInterval   PlanPricingInterval @relation(fields: [planPricingIntervalId], references: [id])
+  isActive              Boolean             @default(true)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  plan                  Plan                @relation(fields: [planId], references: [id])
+  compareAmount         Decimal? // Original price for comparison (showing savings)
+  trialDays             Int? // Trial period for this specific price plan
+  subscriptions         Subscription[]
+  revenueCatPackageId   String?
+  appleProductIdentifier String?
+  googleProductIdentifier String?
+  @@unique([planId, currency, planPricingIntervalId])
+  @@index([planId])
+  @@index([planPricingIntervalId])
+}
+
+model PlanAddon {
+  id                 Int                 @id @default(autoincrement())
+  planId             Int
+  featureId          Int
+  price              Decimal
+  description        String?
+  isActive           Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  plan               Plan                @relation(fields: [planId], references: [id])
+  feature            Feature             @relation(fields: [featureId], references: [id])
+  subscriptionAddons SubscriptionAddon[]
+
+  @@index([planId])
+  @@index([featureId])
+}
+
+model PlanPricingInterval {
+  id             Int         @id @default(autoincrement())
+  code           String      @unique
+  name           String
+  description    String?
+  durationInDays Int? // 30, 365, null (for lifetime)
+  planPrices     PlanPrice[]
+  isPopular      Boolean     @default(false) // To highlight recommended billing period
+  sortOrder      Int? // To display intervals in consistent order
+
+  @@index([code])
+}
+
+model Feature {
+  id                              Int                              @id @default(autoincrement())
+  code                            String                           @unique
+  name                            String
+  description                     String?
+  featureUnitId                   Int? /// null if feature doesn't need measurement
+  isActive                        Boolean                          @default(true)
+  createdAt                       DateTime                         @default(now())
+  updatedAt                       DateTime                         @updatedAt
+  featureUnit                     FeatureUnit?                     @relation(fields: [featureUnitId], references: [id])
+  planFeatures                    PlanFeature[]
+  isHighlighted                   Boolean                          @default(false)
+  sortOrder   Int?      // Add this field
+  planAddons                      PlanAddon[]
+  subscriptionFeatures            SubscriptionFeature[]
+  subscriptionFeatureUsageRecords SubscriptionFeatureUsageRecord[]
+  @@index([featureUnitId])
+}
+
+model FeatureUnit {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique /// TOKENS/CREDITS/etc
+  name        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  features    Feature[]
+}
+
+model PlanFeature {
+  id              Int      @id @default(autoincrement())
+  planId          Int
+  featureId       Int
+  quota           Int? /// null means unlimited access
+  description     String?
+  quotaPeriodDays Int? // null if no period needed, 1 for daily, 30 for monthly
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  feature         Feature  @relation(fields: [featureId], references: [id])
+  plan            Plan     @relation(fields: [planId], references: [id])
+
+  @@unique([planId, featureId])
+  @@index([planId])
+  @@index([featureId])
+}
+
+// subscriptions 
+
+model Subscription {
+  id                 Int                @id @default(autoincrement())
+  organizationId     Int? // null for individual subscriptions
+  userId             Int? // null for org subscriptions
+  planId             Int
+  planPriceId        Int? // null for custom enterprise pricing
+  status             SubscriptionStatus @default(ACTIVE)
+  billingType        BillingType? // STRIPE/WIRE/INVOICE
+  totalSeats         Int? // for enterprise
+  usedSeats          Int? // for enterprise
+  startDate          DateTime           @default(now())
+  endDate            DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialEndsAt        DateTime?
+  canceledAt         DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  // Custom enterprise billing fields
+  customPrice       Decimal? // For enterprise custom pricing
+  customBillingInfo Json? // For wire/invoice details
+  subscriptionManagementUrl String? // For managing the subscription
+  organization        Organization?                    @relation(fields: [organizationId], references: [id])
+  user                User?                            @relation(fields: [userId], references: [id])
+  plan                Plan                             @relation(fields: [planId], references: [id])
+  planPrice           PlanPrice?                       @relation(fields: [planPriceId], references: [id])
+  features            SubscriptionFeature[]
+  seats               SubscriptionSeat[]
+  invoices            SubscriptionInvoice[]
+  addons              SubscriptionAddon[]
+  featureUsageRecords SubscriptionFeatureUsageRecord[]
+  transactions        SubscriptionTransaction[]
+  @@index([organizationId])
+  @@index([userId])
+  @@index([planId])
+}
+
+model SubscriptionTransaction {
+  id                   Int       @id @default(autoincrement())
+  subscriptionId       Int
+  platform             String?   // e.g. "IOS", "ANDROID" (helpful for debugging/analytics)
+  revenueCatPackageId  String?   // The unified package ID from RevenueCat (e.g. "myapp_monthly")
+  productIdentifier    String?   // Store-specific SKU, e.g. "com.myapp.ios.monthly" or "com.myapp.android.monthly"
+  transactionId        String?   // Store-specific transaction ID for this particular purchase/renewal
+  originalTransactionId String?  // Apple’s long-lived “root” transaction ID. On Android, you could store the purchase token or leave null
+  purchaseDate         DateTime? // The purchase/renewal timestamp
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  status               TransactionStatus @default(COMPLETED) // e.g. COMPLETED, REFUNDED, etc.
+  externalReference    String? // For wire transfers/manual payments
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([subscriptionId])
+  // Optionally ensure transactionId is unique if that fits your business logic:
+  // @@unique([transactionId])
+}
+
+
+// For managing billing and payments
+model SubscriptionInvoice {
+  id                Int          @id @default(autoincrement())
+  subscriptionId    Int
+  amount            Decimal?
+  currency          String?
+  status            String // PAID, PENDING, FAILED
+  dueDate           DateTime?
+  paidAt            DateTime?
+  stripeInvoiceId   String? @unique
+  externalReference String? // For wire transfers/manual payments
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id])
+  paymentMethodId Int?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+  @@index([paymentMethodId])
+  @@index([subscriptionId])
+}
+
+model SubscriptionSeat {
+  id             Int       @id @default(autoincrement())
+  subscriptionId Int
+  userId         Int
+  assignedAt     DateTime  @default(now())
+  revokedAt      DateTime?
+  isActive       Boolean   @default(true)
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([subscriptionId, userId])
+  @@index([subscriptionId])
+  @@index([userId])
+}
+
+model SubscriptionFeature {
+  id               Int      @id @default(autoincrement())
+  subscriptionId   Int
+  featureId        Int
+  quota            Int? // null = unlimited
+  usedQuota        Int      @default(0)
+  quotaPeriodDays  Int?
+  lastQuotaResetAt DateTime @default(now())
+
+  subscription Subscription                     @relation(fields: [subscriptionId], references: [id])
+  feature      Feature                          @relation(fields: [featureId], references: [id])
+  usageRecords SubscriptionFeatureUsageRecord[]
+  topups       SubscriptionFeatureTopup[]
+
+  @@unique([subscriptionId, featureId])
+  @@index([subscriptionId])
+  @@index([featureId])
+}
+
+model SubscriptionFeatureUsageRecord {
+  id             Int      @id @default(autoincrement())
+  subscriptionId Int
+  featureId      Int
+  quantity       Int // Amount used
+  recordedAt     DateTime @default(now())
+
+  // Direct links to Subscription and Feature (for easy lookups):
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  feature      Feature      @relation(fields: [featureId], references: [id])
+
+  // Composite link to SubscriptionFeature (so you can easily traverse usage <-> subscriptionFeature):
+  subscriptionFeature SubscriptionFeature @relation(fields: [subscriptionId, featureId], references: [subscriptionId, featureId])
+
+  @@index([subscriptionId])
+  @@index([featureId])
+}
+
+model SubscriptionAddon {
+  id                 Int         @id @default(autoincrement())
+  subscriptionId     Int
+  planAddonId        Int
+  status             AddonStatus
+  startDate          DateTime    @default(now())
+  endDate            DateTime?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  canceledAt         DateTime?
+  price              Decimal // Capture price at time of purchase
+  isActive           Boolean     @default(true)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  planAddon    PlanAddon    @relation(fields: [planAddonId], references: [id])
+
+  @@index([subscriptionId])
+  @@index([planAddonId])
+}
+
+enum AddonStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+}
+
+model SubscriptionFeatureTopup {
+  id                    Int      @id @default(autoincrement())
+  subscriptionFeatureId Int
+  amount                Int // Extra tokens bought
+  price                 Decimal // What they paid
+  purchasedAt           DateTime @default(now())
+  expiresAt             DateTime // End of current billing cycle
+
+  subscriptionFeature SubscriptionFeature @relation(fields: [subscriptionFeatureId], references: [id])
+}
+
+model PaymentMethod {
+  id                   Int     @id @default(autoincrement())
+  userId               Int?    // Optional - for individual users
+  organizationId       Int?    // Optional - for organizations
+  stripePaymentMethodId String? // Optional - null for wire transfers
+  type                 PaymentMethodType // enum: CARD, WIRE
+  details              Json?   // For storing wire transfer details or card info
+  isDefault            Boolean @default(false)
+  
+  user                 User?   @relation(fields: [userId], references: [id])
+  organization         Organization? @relation(fields: [organizationId], references: [id])
+  subscriptionInvoices SubscriptionInvoice[]
+
+  @@index([userId])
+  @@index([organizationId])
+}
+
+enum PaymentMethodType {
+  CREDIT_CARD
+  APPLE_PAY
+  GOOGLE_PAY
+  DEBIT_CARD
+  BANK_TRANSFER
+  PAYPAL
+  WIRE_TRANSFER
+  CHECK
+  OTHER
+}
+
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE        // Add this
+  INCOMPLETE_EXPIRED
+  UNPAID           // Add this
+  PAUSED
+  STARTING_SOON    // Keep if you need it for your business logic
+  EXPIRED
+  PENDING
+}
+
+
+enum TransactionStatus {
+  COMPLETED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FAILED
+}
+
+enum SubscriptionInvoiceStatus {
+  DRAFT           // Initial status
+  OPEN            // Waiting for payment
+  PAID            // Successfully paid
+  UNCOLLECTIBLE   // Payment failed and marked as uncollectible
+  VOID            // Voided invoice
+  DELETED         // Deleted invoice
+  PENDING         // Pending payment
+  FAILED          // Payment failed
+}
+
+enum BillingType {
+  STRIPE
+  WIRE
+  INVOICE
+}
+
+
+model TrainingProgramTemplate {
+  id           Int                   @id @default(autoincrement())
+  name         String
+  description  String
+  duration     Int
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  frequency    Int
+  createdBy    Int?
+  focusId      Int?
+  creator      User?                 @relation("ProgramCreator", fields: [createdBy], references: [id])
+  trainingDays TrainingDayTemplate[]
+  focus        TrainingProgramFocus? @relation(fields: [focusId], references: [id])
+  userPrograms UserTrainingProgram[]
+
+  @@index([createdBy])
+  @@index([focusId])
+}
+
+model TrainingProgramFocus {
+  id           Int                       @id @default(autoincrement())
+  name         String
+  description  String
+  createdAt    DateTime                  @default(now())
+  programs     TrainingProgramTemplate[]
+  userPrograms UserTrainingProgram[]
+}
+
+model TrainingDayTemplate {
+  id                Int                           @id @default(autoincrement())
+  trainingProgramId Int
+  dayNumber         Int
+  name              String
+  trainingProgram   TrainingProgramTemplate       @relation(fields: [trainingProgramId], references: [id])
+  exercises         TrainingDayExerciseTemplate[]
+
+  @@index([trainingProgramId])
+}
+
+model TrainingDayExerciseTemplate {
+  id                  Int                 @id @default(autoincrement())
+  trainingDayId       Int
+  exerciseId          Int
+  orderInDay          Int
+  setsPlanned         Int
+  repsPerSet          Int
+  restTimeBetweenSets Int
+  trainingDay         TrainingDayTemplate @relation(fields: [trainingDayId], references: [id])
+  exercise            Exercise            @relation(fields: [exerciseId], references: [id])
+
+  @@index([trainingDayId])
+  @@index([exerciseId])
+}
+
+model UserTrainingProgram {
+  id                        Int                      @id @default(autoincrement())
+  userId                    Int
+  name                      String
+  description               String
+  duration                  Int
+  frequency                 Int
+  startDate                 DateTime
+  endDate                   DateTime
+  createdAt                 DateTime                 @default(now())
+  focusId                   Int?
+  trainingProgramTemplateId Int?
+  status                    TrainingProgramStatus    @default(ACTIVE)
+  user                      User                     @relation(fields: [userId], references: [id])
+  trainingDays              UserTrainingDay[]
+  focus                     TrainingProgramFocus?    @relation(fields: [focusId], references: [id])
+  trainingProgramTemplate   TrainingProgramTemplate? @relation(fields: [trainingProgramTemplateId], references: [id])
+  level                     TrainingProgramLevel?    
+  @@index([trainingProgramTemplateId])
+  @@index([userId])
+  @@index([focusId])
+}
+
+model UserTrainingDay {
+  id                 Int                   @id @default(autoincrement())
+  userProgramId      Int
+  dayNumber          Int
+  name               String
+  date               DateTime
+  status             TrainingStatus        @default(PLANNED)
+  completedAt        DateTime?
+  notes              String?
+  durationInSeconds  Int?
+  exercisesCompleted Int?
+  exercisesPlanned   Int?
+  type               DayType               @default(TRAINING)
+  userProgram        UserTrainingProgram   @relation(fields: [userProgramId], references: [id])
+  workoutLog         WorkoutLog?
+  exercises          UserProgramExercise[]
+  activity           UserActivity?
+
+  @@index([userProgramId])
+}
+
+model UserProgramExercise {
+  id                  Int             @id @default(autoincrement())
+  userTrainingDayId   Int
+  exerciseId          Int
+  orderInDay          Int
+  setsPlanned         Int
+  repsPerSet          Int
+  restTimeBetweenSets Int
+  userTrainingDay     UserTrainingDay @relation(fields: [userTrainingDayId], references: [id])
+  exercise            Exercise        @relation(fields: [exerciseId], references: [id])
+
+  @@index([userTrainingDayId])
+  @@index([exerciseId])
+}
+
+model UserDailyHealthMetric {
+  id                   Int                 @id @default(autoincrement())
+  userId               Int
+  date                 DateTime
+  measurementTypeId    Int
+  value                Float // e.g., 5000 steps or 3.4 km
+  // Add provider information
+  healthDataProviderId Int?
+  healthDataProvider   HealthDataProvider? @relation(fields: [healthDataProviderId], references: [id])
+  sourceIdentifier     String? // Unique ID from the provider if available
+  dataOrigin           String? // e.g., "HealthKit", "Google Fit", "In App"
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id])
+  measurementType      MeasurementType     @relation(fields: [measurementTypeId], references: [id])
+
+  // Remove platform as it's now in HealthDataProvider
+  // platform        Platform?         // Remove this
+  // Optional: Add unique constraint if provider gives unique IDs for daily metrics
+  // @@unique([providerId, sourceIdentifier, date])  
+
+  @@index([userId])
+  @@index([date])
+  @@index([measurementTypeId])
+  @@index([healthDataProviderId])
+}
+
+// Activity tracking models
+model UserActivity {
+  id                Int                       @id @default(autoincrement())
+  userId            Int
+  startTime         DateTime
+  endTime           DateTime
+  isDeleted         Boolean                   @default(false)
+  isWorkout         Boolean                   @default(false)
+  recordingMethodId Int
+  recordingMethod   HealthDataRecordingMethod @relation(fields: [recordingMethodId], references: [id])
+
+  // Activity type and training day relations
+  activityTypeId    Int
+  userTrainingDayId Int?             @unique
+  activityType      ActivityType     @relation(fields: [activityTypeId], references: [id])
+  userTrainingDay   UserTrainingDay? @relation(fields: [userTrainingDayId], references: [id])
+
+  // Device information
+  deviceModel String? // e.g., "iPhone 15 Pro", "Pixel 7"
+  deviceType  DeviceType? // PHONE, WATCH, etc.
+
+  // Health Data Provider information
+  healthDataProviderId Int?
+  healthDataProvider   HealthDataProvider?   @relation(fields: [healthDataProviderId], references: [id])
+  sourceIdentifier     String? // Unique ID for this activity from the provider
+  dataOrigin           String?
+  // Relations
+  user                 User                  @relation(fields: [userId], references: [id])
+  measurements         ActivityMeasurement[]
+
+  @@unique([userId, healthDataProviderId, sourceIdentifier])
+  // Indexes
+  @@index([userId])
+  @@index([activityTypeId])
+  @@index([userTrainingDayId])
+  @@index([healthDataProviderId])
+  @@index([recordingMethodId])
+}
+
+model ActivityType {
+  id           Int     @id @default(autoincrement())
+  name         String  @unique
+  displayName  String
+  isWorkout    Boolean @default(false)
+  baseActivity String?
+  source       String? @default("smartwatch")
+
+  // Relations
+  activities   UserActivity[]
+  measurements ActivityTypeMeasurement[]
+}
+
+model ActivityMeasurement {
+  id                Int    @id @default(autoincrement())
+  activityId        Int
+  measurementTypeId Int
+  value             Float?
+
+  // Relations
+  activity        UserActivity    @relation(fields: [activityId], references: [id])
+  measurementType MeasurementType @relation(fields: [measurementTypeId], references: [id])
+
+  // Indexes
+  @@index([activityId])
+  @@index([measurementTypeId])
+}
+
+model ActivityTypeMeasurement {
+  id                Int     @id @default(autoincrement())
+  activityTypeId    Int
+  measurementTypeId Int
+  isPrimary         Boolean @default(false)
+
+  // Relations
+  activityType    ActivityType    @relation(fields: [activityTypeId], references: [id])
+  measurementType MeasurementType @relation(fields: [measurementTypeId], references: [id])
+
+  // Constraints and indexes
+  @@unique([activityTypeId, measurementTypeId])
+  @@index([activityTypeId])
+  @@index([measurementTypeId])
+}
+
+model MeasurementType {
+  id          Int    @id @default(autoincrement())
+  name        String @unique
+  unit        String
+  displayName String
+
+  // Relations
+  measurements             ActivityMeasurement[]
+  activityTypeMeasurements ActivityTypeMeasurement[]
+  userDailyHealthMetrics   UserDailyHealthMetric[]
+}
+
+model WorkoutLog {
+  id                Int             @id @default(autoincrement())
+  startTime         DateTime
+  endTime           DateTime
+  notes             String?
+  userTrainingDayId Int             @unique
+  userTrainingDay   UserTrainingDay @relation(fields: [userTrainingDayId], references: [id])
+  exerciseLogs      ExerciseLog[]
+}
+
+model ExerciseLog {
+  id           Int        @id @default(autoincrement())
+  workoutLogId Int
+  actualSets   Int
+  exerciseId   Int
+  workoutLog   WorkoutLog @relation(fields: [workoutLogId], references: [id])
+  exercise     Exercise   @relation(fields: [exerciseId], references: [id])
+  setLogs      SetLog[]
+
+  @@index([workoutLogId])
+  @@index([exerciseId])
+}
+
+model SetLog {
+  id            Int         @id @default(autoincrement())
+  exerciseLogId Int
+  setNumber     Int
+  actualReps    Int
+  weight        Float
+  restTimeAfter Int?
+  exerciseLog   ExerciseLog @relation(fields: [exerciseLogId], references: [id])
+
+  @@index([exerciseLogId])
+}
+
+enum TrainingProgramStatus {
+  ACTIVE
+  INACTIVE
+  COMPLETED
+}
+
+enum TrainingStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+enum DayType {
+  TRAINING
+  REST
+}
+
+enum DeviceType {
+  PHONE
+  WATCH
+  TABLET
+  UNKNOWN
+}
+
+enum TrainingProgramLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+
+model User {
+  // Primary identifiers
+  id          Int    @id @default(autoincrement())
+  clerkUserId String @unique
+  email       String @unique
+  stripeCustomerId String? @unique
+  // Basic profile info
+  firstName   String?
+  lastName    String?
+  avatar      Int?
+  avatarImage Image?  @relation(fields: [avatar], references: [id])
+
+  // Organization related
+  organizationId            Int?
+  organization              Organization?  @relation(fields: [organizationId], references: [id])
+  representativeFor         Organization[] @relation("Representative")
+  // Status flags
+  onboarded                 Boolean        @default(false)
+  licenseId                 Int?
+  appleHealthKitPromptShown Boolean        @default(false)
+  googleFitPromptShown      Boolean        @default(false)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  // AI related
+  openaiThread Thread?
+
+  // User data
+  userRoles       UserRole[]
+  userProfile     UserProfile?
+  userPermissions UserPermission[]
+  userAnswers     UserQuestionAnswer[]
+
+  // Health & Fitness
+  painAssessments    PainAssessment[]
+  weightAssessments  WeightAssessment[]
+  fitnessAssessments FitnessAssessment[]
+  dailyHealthMetrics UserDailyHealthMetric[]
+  activities         UserActivity[]
+
+  // Training & Programs
+  userPrograms    UserTrainingProgram[]
+  createdPrograms TrainingProgramTemplate[] @relation("ProgramCreator")
+  dietPlans       DietPlan[]
+
+  // Coaching
+  coachingSessions     CoachingSession[]            @relation("Coach")
+  participatedSessions CoachingSessionParticipant[]
+
+  // Club related
+  clubs               ClubMember[]
+  createdClubs        Club[]           @relation("ClubCreator")
+  createdClubTeams    ClubTeam[]       @relation("ClubTeamCreator")
+  clubTeamMemberships ClubTeamMember[]
+  invitedMembers      ClubMember[]     @relation("Invitations")
+
+  // Challenge related
+  challengeNews          ChallengeNews[]
+  createdChallenges      Challenge[]            @relation("ChallengeCreator")
+  participatedChallenges ChallengeParticipant[]
+
+  // Organization invites
+  sentInvites   OrganizationInvite[] @relation("SentInvites")
+  accountTypeId Int                  @default(1)
+  accountType   UserAccountType      @relation(fields: [accountTypeId], references: [id])
+
+  deleted           Boolean            @default(false)
+  recipeBookmarks   RecipeBookmark[]
+  exerciseBookmarks ExerciseBookmark[]
+
+  jobTitleId              Int?
+  jobTitle                JobTitle?                @relation(fields: [jobTitleId], references: [id])
+  userHealthDataProviders UserHealthDataProvider[]
+  sdkConnection           SDKConnection[]
+  // Indexes
+
+  subscriptions     Subscription[]
+  subscriptionSeats SubscriptionSeat[]
+
+  paymentMethods        PaymentMethod[]
+
+
+  @@index([organizationId])
+  @@index([clerkUserId])
+  @@index([email])
+  @@index([avatar])
+  @@index([accountTypeId])
+  @@index([jobTitleId])
+}
+
+model JobTitle {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique // CEO, CFO, etc
+  name        String // "Directeur Général", etc
+  description String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int? // For display ordering
+  users       User[] // Relation to users
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([code])
+}
+
+model UserAccountType {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String?
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+}
+
+model UserProfile {
+  id                           Int       @id @default(autoincrement())
+  userId                       Int       @unique
+  birthDate                    DateTime?
+  gender                       String?
+  height                       Float?
+  weight                       Float?
+  goal                         String?
+  generalLifestyleHealthHabits String?
+  nutrition                    String?
+  lifestyle                    String?
+  dailyEnvironmentHabits       String?
+  historyCurrentHealth         String?
+  heightUnit                   String?
+  weightUnit                   String?
+  availableEquipments         String[]
+  desiredTrainingFrequency   String?
+  fitnessLevel               String?
+  user                         User      @relation(fields: [userId], references: [id])
+}
+
+model PainAssessment {
+  id               Int       @id @default(autoincrement())
+  userId           Int
+  assessmentDate   DateTime  @default(now())
+  location         String
+  duration         String
+  intensity        Int
+  medicationTaken  Boolean
+  medicationRelief Boolean?
+  timeOfDay        TimeOfDay
+  affectsSleep     Boolean
+  notes            String?
+  user             User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model WeightAssessment {
+  id             Int      @id @default(autoincrement())
+  userId         Int
+  assessmentDate DateTime @default(now())
+  weight         Float
+  notes          String?
+  user           User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model FitnessAssessment {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  assessmentDate   DateTime @default(now())
+  cardioEndurance  Int?
+  muscularStrength Int?
+  flexibility      Int?
+  balance          Int?
+  notes            String?
+  user             User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model UserRole {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  roleId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  role      Role     @relation(fields: [roleId], references: [id])
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@index([userId])
+}
+
+model Role {
+  id                 Int                  @id @default(autoincrement())
+  code               String               @unique
+  name               String
+  description        String?
+  userRoles          UserRole[]
+  isActive           Boolean              @default(true)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  category           RoleCategory?
+  rolePermissions    RolePermission[]
+  contactRole        OrganizationInvite[] @relation("ContactRole")
+  representativeRole OrganizationInvite[] @relation("RepresentativeRole")
+
+  @@index([code])
+}
+
+model RolePermission {
+  id           Int        @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model Permission {
+  id              Int              @id @default(autoincrement())
+  permission      String           @unique
+  displayName     String
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+}
+
+model UserPermission {
+  id           Int        @id @default(autoincrement())
+  userId       Int
+  permissionId Int
+  granted      Boolean    @default(false)
+  user         User       @relation(fields: [userId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@index([userId])
+  @@index([permissionId])
+}
+
+enum Goal {
+  PAIN_MANAGEMENT
+  WEIGHT_LOSS
+  FITNESS_IMPROVEMENT
+}
+
+enum HeightUnit {
+  cm
+  inches
+}
+
+enum WeightUnit {
+  kg
+  lbs
+}
+
+enum TimeOfDay {
+  MORNING
+  DAY
+  EVENING
+}
+
+enum RoleCategory {
+  SYSTEM
+  ENTERPRISE
+  INDIVIDUAL
+}
+
+

@@ -1,0 +1,370 @@
+model Plan {
+  id            Int            @id @default(autoincrement())
+  code          String         @unique
+  name          String
+  description   String?
+  typeId        Int
+  type          PlanType       @relation(fields: [typeId], references: [id])
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  prices        PlanPrice[]
+  features      PlanFeature[]
+  trialDays     Int? // If all prices of this plan share same trial period
+  sortOrder     Int? // For pricing table display order
+  stripeProductId String? @unique
+  addons        PlanAddon[]
+  subscriptions Subscription[] 
+  isPopular     Boolean        @default(false)
+  revenueCatEntitlementCode String?
+  @@index([typeId])
+}
+
+model PlanType {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  plans       Plan[]
+}
+
+model PlanPrice {
+  id                    Int                 @id @default(autoincrement())
+  planId                Int
+  amount                Decimal
+  currency              String
+  planPricingIntervalId Int
+  planPricingInterval   PlanPricingInterval @relation(fields: [planPricingIntervalId], references: [id])
+  isActive              Boolean             @default(true)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  plan                  Plan                @relation(fields: [planId], references: [id])
+  compareAmount         Decimal? // Original price for comparison (showing savings)
+  trialDays             Int? // Trial period for this specific price plan
+  subscriptions         Subscription[]
+  revenueCatPackageId   String?
+  appleProductIdentifier String?
+  googleProductIdentifier String?
+  @@unique([planId, currency, planPricingIntervalId])
+  @@index([planId])
+  @@index([planPricingIntervalId])
+}
+
+model PlanAddon {
+  id                 Int                 @id @default(autoincrement())
+  planId             Int
+  featureId          Int
+  price              Decimal
+  description        String?
+  isActive           Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  plan               Plan                @relation(fields: [planId], references: [id])
+  feature            Feature             @relation(fields: [featureId], references: [id])
+  subscriptionAddons SubscriptionAddon[]
+
+  @@index([planId])
+  @@index([featureId])
+}
+
+model PlanPricingInterval {
+  id             Int         @id @default(autoincrement())
+  code           String      @unique
+  name           String
+  description    String?
+  durationInDays Int? // 30, 365, null (for lifetime)
+  planPrices     PlanPrice[]
+  isPopular      Boolean     @default(false) // To highlight recommended billing period
+  sortOrder      Int? // To display intervals in consistent order
+
+  @@index([code])
+}
+
+model Feature {
+  id                              Int                              @id @default(autoincrement())
+  code                            String                           @unique
+  name                            String
+  description                     String?
+  featureUnitId                   Int? /// null if feature doesn't need measurement
+  isActive                        Boolean                          @default(true)
+  createdAt                       DateTime                         @default(now())
+  updatedAt                       DateTime                         @updatedAt
+  featureUnit                     FeatureUnit?                     @relation(fields: [featureUnitId], references: [id])
+  planFeatures                    PlanFeature[]
+  isHighlighted                   Boolean                          @default(false)
+  sortOrder   Int?      // Add this field
+  planAddons                      PlanAddon[]
+  subscriptionFeatures            SubscriptionFeature[]
+  subscriptionFeatureUsageRecords SubscriptionFeatureUsageRecord[]
+  @@index([featureUnitId])
+}
+
+model FeatureUnit {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique /// TOKENS/CREDITS/etc
+  name        String
+  description String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  features    Feature[]
+}
+
+model PlanFeature {
+  id              Int      @id @default(autoincrement())
+  planId          Int
+  featureId       Int
+  quota           Int? /// null means unlimited access
+  description     String?
+  quotaPeriodDays Int? // null if no period needed, 1 for daily, 30 for monthly
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  feature         Feature  @relation(fields: [featureId], references: [id])
+  plan            Plan     @relation(fields: [planId], references: [id])
+
+  @@unique([planId, featureId])
+  @@index([planId])
+  @@index([featureId])
+}
+
+// subscriptions 
+
+model Subscription {
+  id                 Int                @id @default(autoincrement())
+  organizationId     Int? // null for individual subscriptions
+  userId             Int? // null for org subscriptions
+  planId             Int
+  planPriceId        Int? // null for custom enterprise pricing
+  status             SubscriptionStatus @default(ACTIVE)
+  billingType        BillingType? // STRIPE/WIRE/INVOICE
+  totalSeats         Int? // for enterprise
+  usedSeats          Int? // for enterprise
+  startDate          DateTime           @default(now())
+  endDate            DateTime?
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialEndsAt        DateTime?
+  canceledAt         DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  // Custom enterprise billing fields
+  customPrice       Decimal? // For enterprise custom pricing
+  customBillingInfo Json? // For wire/invoice details
+  subscriptionManagementUrl String? // For managing the subscription
+  organization        Organization?                    @relation(fields: [organizationId], references: [id])
+  user                User?                            @relation(fields: [userId], references: [id])
+  plan                Plan                             @relation(fields: [planId], references: [id])
+  planPrice           PlanPrice?                       @relation(fields: [planPriceId], references: [id])
+  features            SubscriptionFeature[]
+  seats               SubscriptionSeat[]
+  invoices            SubscriptionInvoice[]
+  addons              SubscriptionAddon[]
+  featureUsageRecords SubscriptionFeatureUsageRecord[]
+  transactions        SubscriptionTransaction[]
+  @@index([organizationId])
+  @@index([userId])
+  @@index([planId])
+}
+
+model SubscriptionTransaction {
+  id                   Int       @id @default(autoincrement())
+  subscriptionId       Int
+  platform             String?   // e.g. "IOS", "ANDROID" (helpful for debugging/analytics)
+  revenueCatPackageId  String?   // The unified package ID from RevenueCat (e.g. "myapp_monthly")
+  productIdentifier    String?   // Store-specific SKU, e.g. "com.myapp.ios.monthly" or "com.myapp.android.monthly"
+  transactionId        String?   // Store-specific transaction ID for this particular purchase/renewal
+  originalTransactionId String?  // Apple’s long-lived “root” transaction ID. On Android, you could store the purchase token or leave null
+  purchaseDate         DateTime? // The purchase/renewal timestamp
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  status               TransactionStatus @default(COMPLETED) // e.g. COMPLETED, REFUNDED, etc.
+  externalReference    String? // For wire transfers/manual payments
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([subscriptionId])
+  // Optionally ensure transactionId is unique if that fits your business logic:
+  // @@unique([transactionId])
+}
+
+
+// For managing billing and payments
+model SubscriptionInvoice {
+  id                Int          @id @default(autoincrement())
+  subscriptionId    Int
+  amount            Decimal?
+  currency          String?
+  status            String // PAID, PENDING, FAILED
+  dueDate           DateTime?
+  paidAt            DateTime?
+  stripeInvoiceId   String? @unique
+  externalReference String? // For wire transfers/manual payments
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id])
+  paymentMethodId Int?
+  paymentMethod   PaymentMethod? @relation(fields: [paymentMethodId], references: [id])
+  @@index([paymentMethodId])
+  @@index([subscriptionId])
+}
+
+model SubscriptionSeat {
+  id             Int       @id @default(autoincrement())
+  subscriptionId Int
+  userId         Int
+  assignedAt     DateTime  @default(now())
+  revokedAt      DateTime?
+  isActive       Boolean   @default(true)
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([subscriptionId, userId])
+  @@index([subscriptionId])
+  @@index([userId])
+}
+
+model SubscriptionFeature {
+  id               Int      @id @default(autoincrement())
+  subscriptionId   Int
+  featureId        Int
+  quota            Int? // null = unlimited
+  usedQuota        Int      @default(0)
+  quotaPeriodDays  Int?
+  lastQuotaResetAt DateTime @default(now())
+
+  subscription Subscription                     @relation(fields: [subscriptionId], references: [id])
+  feature      Feature                          @relation(fields: [featureId], references: [id])
+  usageRecords SubscriptionFeatureUsageRecord[]
+  topups       SubscriptionFeatureTopup[]
+
+  @@unique([subscriptionId, featureId])
+  @@index([subscriptionId])
+  @@index([featureId])
+}
+
+model SubscriptionFeatureUsageRecord {
+  id             Int      @id @default(autoincrement())
+  subscriptionId Int
+  featureId      Int
+  quantity       Int // Amount used
+  recordedAt     DateTime @default(now())
+
+  // Direct links to Subscription and Feature (for easy lookups):
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  feature      Feature      @relation(fields: [featureId], references: [id])
+
+  // Composite link to SubscriptionFeature (so you can easily traverse usage <-> subscriptionFeature):
+  subscriptionFeature SubscriptionFeature @relation(fields: [subscriptionId, featureId], references: [subscriptionId, featureId])
+
+  @@index([subscriptionId])
+  @@index([featureId])
+}
+
+model SubscriptionAddon {
+  id                 Int         @id @default(autoincrement())
+  subscriptionId     Int
+  planAddonId        Int
+  status             AddonStatus
+  startDate          DateTime    @default(now())
+  endDate            DateTime?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  canceledAt         DateTime?
+  price              Decimal // Capture price at time of purchase
+  isActive           Boolean     @default(true)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  planAddon    PlanAddon    @relation(fields: [planAddonId], references: [id])
+
+  @@index([subscriptionId])
+  @@index([planAddonId])
+}
+
+enum AddonStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+}
+
+model SubscriptionFeatureTopup {
+  id                    Int      @id @default(autoincrement())
+  subscriptionFeatureId Int
+  amount                Int // Extra tokens bought
+  price                 Decimal // What they paid
+  purchasedAt           DateTime @default(now())
+  expiresAt             DateTime // End of current billing cycle
+
+  subscriptionFeature SubscriptionFeature @relation(fields: [subscriptionFeatureId], references: [id])
+}
+
+model PaymentMethod {
+  id                   Int     @id @default(autoincrement())
+  userId               Int?    // Optional - for individual users
+  organizationId       Int?    // Optional - for organizations
+  stripePaymentMethodId String? // Optional - null for wire transfers
+  type                 PaymentMethodType // enum: CARD, WIRE
+  details              Json?   // For storing wire transfer details or card info
+  isDefault            Boolean @default(false)
+  
+  user                 User?   @relation(fields: [userId], references: [id])
+  organization         Organization? @relation(fields: [organizationId], references: [id])
+  subscriptionInvoices SubscriptionInvoice[]
+
+  @@index([userId])
+  @@index([organizationId])
+}
+
+enum PaymentMethodType {
+  CREDIT_CARD
+  APPLE_PAY
+  GOOGLE_PAY
+  DEBIT_CARD
+  BANK_TRANSFER
+  PAYPAL
+  WIRE_TRANSFER
+  CHECK
+  OTHER
+}
+
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE        // Add this
+  INCOMPLETE_EXPIRED
+  UNPAID           // Add this
+  PAUSED
+  STARTING_SOON    // Keep if you need it for your business logic
+  EXPIRED
+  PENDING
+}
+
+
+enum TransactionStatus {
+  COMPLETED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FAILED
+}
+
+enum SubscriptionInvoiceStatus {
+  DRAFT           // Initial status
+  OPEN            // Waiting for payment
+  PAID            // Successfully paid
+  UNCOLLECTIBLE   // Payment failed and marked as uncollectible
+  VOID            // Voided invoice
+  DELETED         // Deleted invoice
+  PENDING         // Pending payment
+  FAILED          // Payment failed
+}
+
+enum BillingType {
+  STRIPE
+  WIRE
+  INVOICE
+}

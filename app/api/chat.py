@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import logging
 import asyncio
 import json
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 
 from llama_index.core.settings import Settings
 from llama_index.llms.openai import OpenAI
@@ -27,8 +27,10 @@ from app.core.cache import (
     cache_user_memories,
     get_cached_user_profile,
     cache_user_profile,
+    get_cached_training_program,
+    cache_user_training_program,
 )
-from app.core.database import get_user_profile
+from app.core.database import get_user_profile, get_user_training_program_overview
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -121,7 +123,11 @@ async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict
             logger.debug(f"🧠 Mem0 client not available for {user_id}")
             return []
 
-        result = mem0_client.get_memories(user_id=user_id, limit=limit)
+        result = await asyncio.to_thread(
+            mem0_client.get_memories,
+            user_id=user_id,
+            limit=limit,
+        )
         if result.get("success"):
             memories = result.get("memories", [])
             logger.info(f"🧠 Fetched {len(memories)} memories from Mem0 for {user_id}")
@@ -153,7 +159,7 @@ async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
 
     # Cache miss - fetch from database
     try:
-        profile = get_user_profile(int(user_id))
+        profile = await asyncio.to_thread(get_user_profile, int(user_id))
         if profile:
             logger.info(f"👤 Fetched profile from database for user {user_id}")
             # Cache for future requests
@@ -167,27 +173,181 @@ async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
         return {}
 
 
+async def get_or_fetch_user_training_program(user_id: str) -> Dict[str, Any]:
+    """Retrieve user training program summary via cache or database."""
+    cached_program = await get_cached_training_program(user_id)
+    if cached_program is not None:
+        if "snapshot" not in cached_program:
+            snapshot = _format_training_program_context(cached_program)
+            if snapshot:
+                cached_program["snapshot"] = snapshot
+        logger.info(f"🏋️ Using cached training snapshot for user {user_id}")
+        return cached_program
+
+    try:
+        program = await asyncio.to_thread(get_user_training_program_overview, int(user_id))
+        summary: Dict[str, Any] = {"hasProgram": False}
+        if program:
+            summary = {"hasProgram": True, "program": program}
+
+        snapshot = _format_training_program_context(summary)
+        if snapshot:
+            summary["snapshot"] = snapshot
+
+        await cache_user_training_program(user_id, summary)
+        logger.info(f"🏋️ Cached fresh training snapshot for user {user_id}")
+        return summary
+    except Exception as e:
+        logger.error(f"🏋️ Error fetching training program: {e}")
+        return {}
+
+
+def _format_user_profile_context(user_profile: Dict[str, Any]) -> Optional[str]:
+    """Convert user profile dict into a readable system context string."""
+    if not user_profile:
+        return None
+
+    lines = []
+
+    first_name = user_profile.get("firstName") or user_profile.get("firstname")
+    last_name = user_profile.get("lastName") or user_profile.get("lastname")
+    if first_name and last_name:
+        lines.append(f"User's name: {first_name} {last_name}")
+    elif first_name:
+        lines.append(f"User's name: {first_name}")
+
+    email = user_profile.get("email")
+    if email:
+        lines.append(f"Email: {email}")
+
+    birth_date = user_profile.get("birthDate") or user_profile.get("birthdate")
+    if birth_date:
+        lines.append(f"Birth date: {birth_date}")
+
+    gender = user_profile.get("gender")
+    if gender:
+        lines.append(f"Gender: {gender}")
+
+    height = user_profile.get("height")
+    height_unit = user_profile.get("heightUnit") or user_profile.get("heightunit")
+    if height is not None:
+        lines.append(
+            f"Height: {height}{f' {height_unit}' if height_unit else ''}".strip()
+        )
+
+    weight = user_profile.get("weight")
+    weight_unit = user_profile.get("weightUnit") or user_profile.get("weightunit")
+    if weight is not None:
+        lines.append(
+            f"Weight: {weight}{f' {weight_unit}' if weight_unit else ''}".strip()
+        )
+
+    goal = user_profile.get("goal")
+    if goal:
+        lines.append(f"Primary goal: {goal}")
+
+    fitness_level = user_profile.get("fitnessLevel") or user_profile.get("fitnesslevel")
+    if fitness_level:
+        lines.append(f"Fitness level: {fitness_level}")
+
+    desired_freq = user_profile.get("desiredTrainingFrequency") or user_profile.get(
+        "desiredtrainingfrequency"
+    )
+    if desired_freq:
+        lines.append(f"Desired training frequency: {desired_freq}")
+
+    equipments = user_profile.get("availableEquipments") or user_profile.get(
+        "availableequipments"
+    )
+    if equipments:
+        if isinstance(equipments, (list, tuple)):
+            equipments_str = ", ".join(str(item) for item in equipments)
+        else:
+            equipments_str = str(equipments)
+        lines.append(f"Available equipment: {equipments_str}")
+
+    if not lines:
+        return None
+
+    return "User Profile:\n" + "\n".join(lines)
+
+
+def _format_training_program_context(summary: Dict[str, Any]) -> Optional[str]:
+    """Convert training program summary into a condensed snapshot for the agent."""
+    if not summary:
+        return None
+
+    def _fmt(value: Any, default: str = "Non spécifié") -> str:
+        if value is None or value == "":
+            return default
+        return str(value)
+
+    lines: List[str] = ["TRAINING PROGRAM SNAPSHOT:"]
+
+    if not summary.get("hasProgram"):
+        lines.append("Aucun programme d'entraînement actif n'est enregistré pour cet utilisateur.")
+        return "\n".join(lines)
+
+    program = summary.get("program") or {}
+    lines.append(f"Nom: {_fmt(program.get('name'))}")
+    lines.append(f"Objectif: {_fmt(program.get('focus'))}")
+    status_value = program.get("status")
+    if status_value:
+        lines.append(f"Statut: {_fmt(status_value)}")
+    lines.append(f"Durée: {_fmt(program.get('durationWeeks'))} semaines")
+    lines.append(f"Fréquence: {_fmt(program.get('frequencyPerWeek'))} séances par semaine")
+
+    start_date = program.get("startDate")
+    end_date = program.get("endDate")
+    if start_date or end_date:
+        lines.append(f"Période: {_fmt(start_date)} → {_fmt(end_date)}")
+
+    training_days = program.get("trainingDays") or []
+    if not training_days:
+        lines.append("Aucun jour d'entraînement planifié pour le moment.")
+    else:
+        max_days = 4
+        for day in training_days[:max_days]:
+            day_title = f"Jour {day.get('dayNumber')}: {_fmt(day.get('name'), 'Sans nom')}"
+            date_part = day.get('date')
+            if date_part:
+                day_title += f" ({date_part})"
+            lines.append(day_title)
+
+            exercises = day.get("exercises") or []
+            for exercise in exercises[:4]:
+                exercise_line = f"  • {_fmt(exercise.get('name'))}"
+                sets = exercise.get('sets')
+                reps = exercise.get('reps')
+                rest = exercise.get('restSeconds')
+                details: List[str] = []
+                if sets:
+                    details.append(f"{sets} séries")
+                if reps:
+                    details.append(f"{reps} reps")
+                if rest:
+                    details.append(f"repos {rest}s")
+                if details:
+                    exercise_line += f" ({', '.join(details)})"
+                lines.append(exercise_line)
+
+            if len(exercises) > 4:
+                lines.append(f"  • … {len(exercises) - 4} autres exercices")
+
+        if len(training_days) > max_days:
+            lines.append(f"… {len(training_days) - max_days} autres jours d'entraînement non listés")
+
+    return "\n".join(lines)
+
+
 def build_message_array_context(history, current_message, user_profile=None, user_memories=None, limit=3, include_memories=True):
     """Build universal message array context that works with all LLM providers."""
     messages = []
 
     # Add user profile as system context (if available)
     if user_profile:
-        profile_parts = []
-        first_name = user_profile.get("firstName") or user_profile.get("firstname")
-        last_name = user_profile.get("lastName") or user_profile.get("lastname")
-
-        if first_name:
-            profile_parts.append(f"User's name: {first_name}")
-            if last_name:
-                profile_parts[0] = f"User's name: {first_name} {last_name}"
-
-        email = user_profile.get("email")
-        if email:
-            profile_parts.append(f"Email: {email}")
-
-        if profile_parts:
-            profile_context = "User Profile:\n" + "\n".join(profile_parts)
+        profile_context = _format_user_profile_context(user_profile)
+        if profile_context:
             messages.append({
                 "role": "system",
                 "content": profile_context
@@ -227,7 +387,7 @@ def build_message_array_context(history, current_message, user_profile=None, use
     return messages
 
 
-async def build_pain_agent_context(user_id: str, current_message: str, body_region: str = "general", user_memories=None, include_memories=True):
+async def build_pain_agent_context(user_id: str, current_message: str, body_region: str = "general", user_memories=None, include_memories=True, user_profile=None):
     """Build isolated context for pain agent using only pain session messages.
 
     This ensures the pain agent sees only messages from the current pain assessment
@@ -237,6 +397,15 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
     Also injects available questions from the Redis queue into the context.
     """
     messages = []
+
+    # Add user profile context if provided
+    if user_profile:
+        profile_context = _format_user_profile_context(user_profile)
+        if profile_context:
+            messages.append({
+                "role": "system",
+                "content": profile_context
+            })
 
     # Add user memories as system context (if enabled and available)
     if include_memories and user_memories:
@@ -320,14 +489,24 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
 
         if questions:
             queue_context = "QUESTIONS SUGGÉRÉES (inspirations pour ton prochain question):\n"
-            for idx, q in enumerate(questions[:15], 1):  # Limit to top 15 for better coverage
+            top_questions = questions[:15]
+            for idx, q in enumerate(top_questions, 1):  # Limit to top 15 for better coverage
                 queue_context += f"{idx}. {q}\n"
 
             messages.append({
                 "role": "system",
                 "content": queue_context
             })
-            logger.info(f"📋 Injected {len(questions[:15])} suggested questions into pain agent context")
+            logger.info(
+                "📋 Injected %d suggested questions into pain agent context",
+                len(top_questions)
+            )
+            logger.info(
+                "🗂️ Queue snapshot for user=%s region=%s: %s",
+                user_id,
+                body_region,
+                top_questions,
+            )
     except Exception as e:
         logger.warning(f"⚠️ Failed to inject queue into context: {e}")
 
@@ -535,6 +714,10 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # Memories will be injected only into GeneralQA agent context
             user_memories = await get_or_fetch_user_memories(user_id, limit=20)
 
+            # 🏋️ FETCH USER TRAINING SNAPSHOT ONCE PER REQUEST (cached in Redis for 15 minutes)
+            training_program_summary = await get_or_fetch_user_training_program(user_id)
+            training_snapshot = training_program_summary.get("snapshot")
+
             # Initialize LLM
             temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.7
             llm = OpenAI(model=DEFAULT_MODEL, temperature=temp)
@@ -589,6 +772,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     body_region=body_region,
                     user_memories=[],
                     include_memories=False,
+                    user_profile=user_profile,
                 )
             else:
                 logger.info(f"🟢 Pain session INACTIVE - building agent context from full history for {user_id}")
@@ -643,6 +827,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         router_context=routing_messages,
                         agent_context=agent_messages,
                         user_id=user_id,
+                        training_context=training_snapshot,
                     ):
                         # Handle structured events (e.g., tool_result) emitted by workflow
                         if isinstance(response_chunk, dict) and response_chunk.get("event") == "tool_result":
@@ -686,6 +871,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         router_context=routing_messages,
                         agent_context=agent_messages,
                         user_id=user_id,
+                        training_context=training_snapshot,
                     )
                 elif hasattr(workflow, 'arun'):
                     result = await workflow.arun(
@@ -693,6 +879,7 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                         router_context=routing_messages,
                         agent_context=agent_messages,
                         user_id=user_id,
+                        training_context=training_snapshot,
                     )
                 else:
                     result = ""
@@ -719,6 +906,17 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             # Unwrap pain agent structured JSON responses if needed
             if handling_agent == "EnhancedPainAssessmentAgent":
                 final_response_content = unwrap_pain_agent_response(final_response_content)
+                if final_response_content:
+                    if "```json" in final_response_content:
+                        logger.info(
+                            "🗣️ Pain agent question payload:\n%s",
+                            final_response_content,
+                        )
+                    else:
+                        logger.info(
+                            "🗣️ Pain agent response (non-question): %s",
+                            final_response_content,
+                        )
 
             # Store messages based on which agent handled the request
             if handling_agent == "EnhancedPainAssessmentAgent":
@@ -729,36 +927,10 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     logger.info(f"🔴 Starting new pain session for {user_id}")
                     await start_pain_agent_session(user_id)
 
-                    # 🚀 LAUNCH INITIAL RAG RETRIEVAL (non-blocking background thread)
-                    # This pre-populates the question queue for the pain agent
-                    try:
-                        from app.knowledge.enhanced_assessment_tools import launch_initial_pain_rag, launch_mem0_retrieval
-                        # Extract body region from user message (simple heuristic)
-                        body_region = "general"  # Default
-                        message_lower = user_message.lower()
-                        region_map = {
-                            "dos": ["dos", "lombaire", "colonne"],
-                            "épaule": ["épaule", "epaule"],
-                            "genou": ["genou", "genoux"],
-                            "cou": ["cou", "cervical"],
-                            "hanche": ["hanche"],
-                            "cheville": ["cheville", "pied"],
-                        }
-                        for region, keywords in region_map.items():
-                            if any(kw in message_lower for kw in keywords):
-                                body_region = region
-                                break
-
-                        logger.info(f"🚀 Launching initial RAG for user={user_id} region={body_region}")
-                        launch_initial_pain_rag(user_id, body_region, user_message)
-
-                        # 🧠 LAUNCH MEM0 RETRIEVAL (async, non-blocking)
-                        logger.info(f"🧠 Launching Mem0 retrieval for user={user_id} region={body_region}")
-                        launch_mem0_retrieval(user_id, body_region, user_message)
-
-                    except Exception as e:
-                        logger.error(f"❌ Failed to launch initial RAG/Mem0: {e}")
-                        # Don't fail the request if RAG/Mem0 launch fails
+                    # 🧠 NOTE: Initial RAG retrieval is now the pain agent's responsibility
+                    # The pain agent will call retrieve_with_llm_queries() tool after understanding
+                    # the pain location through conversation, not through keyword matching.
+                    # This ensures true AI-driven semantic understanding instead of pattern matching.
 
                 # ALWAYS add both user message and assistant response to the pain session storage
                 # (the user message was used in context building but not yet persisted to session)
@@ -810,14 +982,15 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                     mem0_client = get_mem0_client()
                     if mem0_client:
                         # Store user message (Mem0 will extract facts automatically)
-                        mem0_client.add_memory(
+                        await asyncio.to_thread(
+                            mem0_client.add_memory,
                             message=user_message,
                             user_id=user_id,
                             metadata={
                                 "type": "qa_conversation",
                                 "role": "user",
                                 "agent": "GeneralQAAgent"
-                            }
+                            },
                         )
                         logger.info(f"🧠 Stored QA user message to Mem0 for user={user_id}")
                 except Exception as e:
@@ -882,7 +1055,10 @@ __all__ = ["router", "legacy_router", "get_or_build_workflow", "warmup_agents"]
 async def get_user_memories(user_id: str, limit: int = 10):
     """Retrieve user memories from Mem0."""
     try:
-        result = get_mem0_client().get_memories(user_id, limit)
+        mem0_client = get_mem0_client()
+        if not mem0_client:
+            raise HTTPException(status_code=503, detail="Mem0 client not available")
+        result = await asyncio.to_thread(mem0_client.get_memories, user_id, limit)
         if result["success"]:
             return {"memories": result["memories"], "user_id": user_id}
         else:
@@ -894,7 +1070,12 @@ async def get_user_memories(user_id: str, limit: int = 10):
 async def search_user_memories(user_id: str, query: str, limit: int = 5):
     """Search user memories in Mem0."""
     try:
-        result = get_mem0_client().search_memories(query, user_id, limit)
+        mem0_client = get_mem0_client()
+        if not mem0_client:
+            raise HTTPException(status_code=503, detail="Mem0 client not available")
+        result = await asyncio.to_thread(
+            mem0_client.search_memories, query, user_id, limit
+        )
         if result["success"]:
             return {"memories": result["memories"], "user_id": user_id, "query": query}
         else:
@@ -906,7 +1087,10 @@ async def search_user_memories(user_id: str, query: str, limit: int = 5):
 async def clear_user_memories(user_id: str):
     """Clear all memories for a specific user."""
     try:
-        result = get_mem0_client().delete_all_memories(user_id)
+        mem0_client = get_mem0_client()
+        if not mem0_client:
+            raise HTTPException(status_code=503, detail="Mem0 client not available")
+        result = await asyncio.to_thread(mem0_client.delete_all_memories, user_id)
         if result["success"]:
             return {
                 "message": f"Successfully cleared all memories for user {user_id}",

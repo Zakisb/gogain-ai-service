@@ -9,42 +9,15 @@ import logging
 from typing import List
 from llama_index.core.tools import FunctionTool
 
+from app.core.cache import invalidate_user_training_program_cache
+from app.core.memory import get_mem0_client
 from app.tools.training_helpers import (
-    check_user_has_training_program,
     get_training_program_templates,
     select_exercises_with_ai,
     create_user_training_program,
-    get_user_training_program_details
 )
 
 logger = logging.getLogger(__name__)
-
-
-def check_user_training_program(user_id: str = None) -> str:
-    """Check if the user has an active training program.
-
-    Args:
-        user_id: User ID (injected programmatically by workflow, not by LLM)
-
-    Returns:
-        String indicating whether user has a training program
-    """
-    try:
-        # user_id is injected by workflow, fallback to context if not provided
-        if not user_id:
-            from app.knowledge.enhanced_assessment_tools import get_user_context
-            user_id = get_user_context()
-
-        has_program = check_user_has_training_program(user_id)
-
-        if has_program:
-            return "L'utilisateur a un programme d'entraînement actif. Utilisez get_user_training_program pour voir les détails."
-        else:
-            return "L'utilisateur n'a pas de programme d'entraînement actif. Vous pouvez proposer de créer un nouveau programme."
-
-    except Exception as e:
-        logger.error(f"Error checking user training program: {e}")
-        return "Impossible de vérifier le programme d'entraînement de l'utilisateur."
 
 
 def get_programs() -> str:
@@ -74,6 +47,64 @@ def get_programs() -> str:
         return "Impossible de récupérer les programmes d'entraînement."
 
 
+def save_fitness_goal_assessment(
+    user_id: str,
+    fitness_goal_summary: str
+) -> str:
+    """Save fitness goal assessment summary to Mem0 for long-term memory.
+
+    This tool is called at the END of the fitness goal assessment workflow to store
+    the complete assessment including user goals, preferences, and constraints.
+
+    Args:
+        user_id: User ID (injected programmatically by workflow, not by LLM)
+        fitness_goal_summary: Complete summary of fitness goal assessment including:
+                             - Primary fitness goal
+                             - All answers to goal-specific questions
+                             - User preferences (status, availability, tracking)
+                             - Constraints and special considerations
+
+    Returns:
+        Success or error message
+    """
+    try:
+        # user_id is injected by workflow; fail fast if missing
+        if not user_id:
+            logger.error("save_fitness_goal_assessment called without user_id")
+            return "Impossible d'identifier l'utilisateur pour sauvegarder l'évaluation."
+
+        # Get Mem0 client
+        mem0 = get_mem0_client()
+        if not mem0:
+            logger.error("Mem0 client not initialized")
+            return "Service de mémoire non disponible. Impossible de sauvegarder l'évaluation."
+
+        # Save to Mem0 with metadata
+        result = mem0.add_memory(
+            message=fitness_goal_summary,
+            user_id=str(user_id),
+            metadata={
+                "type": "fitness_goal_assessment",
+                "category": "training"
+            }
+        )
+
+        if result.get("success"):
+            logger.info(f"✅ Fitness goal assessment saved to Mem0 for user {user_id}")
+            return (
+                "✅ Évaluation des objectifs fitness sauvegardée avec succès ! "
+                "Je vais maintenant utiliser ces informations pour créer ton programme personnalisé."
+            )
+        else:
+            error = result.get("error", "Erreur inconnue")
+            logger.error(f"❌ Failed to save fitness goal assessment: {error}")
+            return f"❌ Erreur lors de la sauvegarde de l'évaluation: {error}"
+
+    except Exception as e:
+        logger.error(f"Error saving fitness goal assessment: {e}", exc_info=True)
+        return f"Erreur lors de la sauvegarde de l'évaluation: {str(e)}"
+
+
 def create_training_program(
     goal: str,
     level: str,
@@ -100,10 +131,10 @@ def create_training_program(
         Success or error message
     """
     try:
-        # user_id is injected by workflow, fallback to context if not provided
+        # user_id is injected by workflow; fail fast if missing to avoid ambiguity
         if not user_id:
-            from app.knowledge.enhanced_assessment_tools import get_user_context
-            user_id = get_user_context()
+            logger.error("create_training_program called without user_id")
+            return "Impossible d'identifier l'utilisateur pour créer le programme."
         # Validate inputs
         valid_goals = ["RESTER EN FORME", "REDESSINER SA SILHOUETTE"]
         if goal not in valid_goals:
@@ -147,7 +178,11 @@ def create_training_program(
 
         if result.get("success"):
             program_name = program_data.get("name", "Programme personnalisé")
-            return f"✅ Programme créé avec succès: {program_name}\n\nVous pouvez maintenant consulter votre programme avec get_user_training_program."
+            invalidate_user_training_program_cache(str(user_id))
+            return (
+                f"✅ Programme créé avec succès: {program_name}\n\n"
+                "Tu peux me demander à tout moment d'afficher ton programme pour voir les détails."
+            )
         else:
             error_msg = result.get("message", "Erreur inconnue")
             return f"❌ Erreur lors de la création du programme: {error_msg}"
@@ -157,49 +192,7 @@ def create_training_program(
         return f"Erreur lors de la création du programme d'entraînement: {str(e)}"
 
 
-def get_user_training_program(user_id: str = None) -> str:
-    """Get detailed information about the user's current training program.
-
-    This includes all training days, exercises, sets, reps, and rest times.
-
-    Args:
-        user_id: User ID (injected programmatically by workflow, not by LLM)
-
-    Returns:
-        Formatted string with complete program details
-    """
-    try:
-        # user_id is injected by workflow, fallback to context if not provided
-        if not user_id:
-            from app.knowledge.enhanced_assessment_tools import get_user_context
-            user_id = get_user_context()
-
-        program_details = get_user_training_program_details(user_id)
-
-        if not program_details:
-            return "Aucun programme d'entraînement trouvé pour cet utilisateur."
-
-        return program_details
-
-    except Exception as e:
-        logger.error(f"Error getting user training program: {e}")
-        return "Impossible de récupérer le programme d'entraînement de l'utilisateur."
-
-
 # Factory functions to create LlamaIndex tools
-
-def get_check_training_program_tool() -> FunctionTool:
-    """Factory to create the check_user_training_program tool."""
-    return FunctionTool.from_defaults(
-        fn=check_user_training_program,
-        name="check_user_training_program",
-        description=(
-            "Vérifie si l'utilisateur a un programme d'entraînement actif. "
-            "Utilisez cet outil avant de proposer de créer un nouveau programme. "
-            "Le user_id est fourni automatiquement par le système."
-        )
-    )
-
 
 def get_programs_tool() -> FunctionTool:
     """Factory to create the get_programs tool."""
@@ -209,6 +202,21 @@ def get_programs_tool() -> FunctionTool:
         description=(
             "Récupère la liste des programmes d'entraînement disponibles (templates). "
             "Chaque programme a un ID, un nom, une description, une durée et une fréquence."
+        )
+    )
+
+
+def get_save_fitness_goal_assessment_tool() -> FunctionTool:
+    """Factory to create the save_fitness_goal_assessment tool."""
+    return FunctionTool.from_defaults(
+        fn=save_fitness_goal_assessment,
+        name="save_fitness_goal_assessment",
+        description=(
+            "Sauvegarde le résumé complet de l'évaluation des objectifs fitness dans Mem0 pour mémoire à long terme. "
+            "Cet outil doit être appelé à la FIN du workflow d'évaluation des objectifs, une seule fois, "
+            "après avoir collecté toutes les informations nécessaires (objectif principal, réponses aux questions "
+            "spécifiques, préférences utilisateur, disponibilités, contraintes). Le user_id est fourni automatiquement "
+            "par le système. Paramètres requis: fitness_goal_summary (résumé textuel complet de l'évaluation)."
         )
     )
 
@@ -229,21 +237,6 @@ def get_create_training_program_tool() -> FunctionTool:
         )
     )
 
-
-def get_user_training_program_tool() -> FunctionTool:
-    """Factory to create the get_user_training_program tool."""
-    return FunctionTool.from_defaults(
-        fn=get_user_training_program,
-        name="get_user_training_program",
-        description=(
-            "Récupère les détails complets du programme d'entraînement actuel de l'utilisateur, "
-            "incluant tous les jours d'entraînement, exercices, séries, répétitions et temps de repos. "
-            "Utilisez cet outil lorsque l'utilisateur demande à voir son programme ou ses exercices. "
-            "Le user_id est fourni automatiquement par le système."
-        )
-    )
-
-
 def get_all_training_tools() -> List[FunctionTool]:
     """Get all training tools as a list.
 
@@ -251,8 +244,7 @@ def get_all_training_tools() -> List[FunctionTool]:
         List of all training-related FunctionTool instances
     """
     return [
-        get_check_training_program_tool(),
         # get_programs_tool(),  # Removed - not needed for AI-generated programs
+        get_save_fitness_goal_assessment_tool(),
         get_create_training_program_tool(),
-        get_user_training_program_tool(),
     ]

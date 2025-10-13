@@ -1,0 +1,37 @@
+// Recipe bookmarks
+model RecipeBookmark {
+  id        Int      @id @default(autoincrement())
+  userId    Int // References User id
+  recipeId  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user   User   @relation(fields: [userId], references: [id])
+  recipe Recipe @relation(fields: [recipeId], references: [id])
+
+  // Ensure a user can't bookmark the same recipe twice
+  @@unique([userId, recipeId])
+  // Indexes for better query performance
+  @@index([userId])
+  @@index([recipeId])
+}
+
+// Exercise bookmarksd
+model ExerciseBookmark {
+  id         Int      @id @default(autoincrement())
+  userId     Int // References User id
+  exerciseId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id])
+  exercise Exercise @relation(fields: [exerciseId], references: [id])
+
+  // Ensure a user can't bookmark the same exercise twice
+  @@unique([userId, exerciseId])
+  // Indexes for better query performance
+  @@index([userId])
+  @@index([exerciseId])
+}

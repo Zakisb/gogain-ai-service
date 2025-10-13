@@ -1,0 +1,45 @@
+model Question {
+  id                 Int              @id @default(autoincrement())
+  question           String
+  isArchived         Boolean          @default(false)
+  questionCategoryId Int
+  questionCategory   QuestionCategory @relation(fields: [questionCategoryId], references: [id])
+  questionAnswers    QuestionAnswer[]
+
+  @@index([questionCategoryId])
+}
+
+model UserQuestionAnswer {
+  id               Int            @id @default(autoincrement())
+  userId           Int
+  questionAnswerId Int
+  user             User           @relation(fields: [userId], references: [id])
+  questionAnswer   QuestionAnswer @relation(fields: [questionAnswerId], references: [id])
+
+  @@index([userId])
+  @@index([questionAnswerId])
+}
+
+model QuestionAnswer {
+  id          Int                  @id @default(autoincrement())
+  questionId  Int
+  answerId    Int
+  question    Question             @relation(fields: [questionId], references: [id])
+  answer      Answer               @relation(fields: [answerId], references: [id])
+  userAnswers UserQuestionAnswer[]
+}
+
+model Answer {
+  id              Int              @id @default(autoincrement())
+  isArchived      Boolean          @default(false)
+  text            String
+  description     String?
+  questionAnswers QuestionAnswer[]
+}
+
+model QuestionCategory {
+  id        Int        @id @default(autoincrement())
+  category  String
+  value     String     @unique
+  questions Question[]
+}

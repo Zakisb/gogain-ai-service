@@ -1,0 +1,30 @@
+model CoachingSession {
+  id              Int                          @id @default(autoincrement())
+  organizationId  Int
+  coachId         Int
+  name            String
+  description     String
+  date            DateTime
+  startTime       DateTime
+  endTime         DateTime
+  maxParticipants Int
+  createdAt       DateTime                     @default(now())
+  updatedAt       DateTime                     @updatedAt
+  coach           User                         @relation("Coach", fields: [coachId], references: [id])
+  participants    CoachingSessionParticipant[]
+
+  @@index([coachId])
+  @@index([organizationId])
+}
+
+model CoachingSessionParticipant {
+  id                Int             @id @default(autoincrement())
+  coachingSessionId Int
+  userId            Int
+  joinedAt          DateTime        @default(now())
+  coachingSession   CoachingSession @relation(fields: [coachingSessionId], references: [id])
+  user              User            @relation(fields: [userId], references: [id])
+
+  @@index([coachingSessionId])
+  @@index([userId])
+}

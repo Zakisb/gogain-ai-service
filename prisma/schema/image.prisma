@@ -1,0 +1,36 @@
+model Image {
+  id            Int              @id @default(autoincrement())
+  url           String           @unique
+  publicId      String           @unique
+  width         Int?
+  height        Int?
+  format        String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  displayName   String?
+  originalName  String?
+  categoryId    Int
+  defaultType   DefaultImageType @default(NONE) // Here
+  clubs         Club[]
+  category      ImageCategory    @relation(fields: [categoryId], references: [id])
+  clubTeams     ClubTeam[]
+  users         User[]
+  challenges    Challenge[]
+  recipes       Recipe[]
+  organizations Organization[]
+
+  @@index([categoryId])
+}
+
+model ImageCategory {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  description String?
+  images      Image[]
+}
+
+enum DefaultImageType {
+  USER_AVATAR
+  ORGANIZATION_AVATAR
+  NONE
+}

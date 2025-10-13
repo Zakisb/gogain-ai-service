@@ -1,0 +1,83 @@
+model Recipe {
+  id          Int                @id @default(autoincrement())
+  name        String
+  servings    Int                @default(1)
+  prepTime    Int?
+  cookTime    Int?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  imageId     Int?
+  typeId      Int?
+  ingredients RecipeIngredient[]
+  steps       RecipeStep[]
+  nutrition   RecipeNutrition?
+  image       Image?             @relation(fields: [imageId], references: [id])
+  type        RecipeType?        @relation(fields: [typeId], references: [id])
+  description String?
+  bookmarks   RecipeBookmark[]
+
+  @@index([imageId])
+  @@index([typeId])
+}
+
+model RecipeType {
+  id      Int      @id @default(autoincrement())
+  code    String   @unique
+  name    String
+  recipes Recipe[]
+}
+
+model Ingredient {
+  id                Int                @id @default(autoincrement())
+  name              String             @unique
+  nameEn            String?
+  category          String?
+  recipeIngredients RecipeIngredient[]
+}
+
+model RecipeIngredient {
+  id           Int        @id @default(autoincrement())
+  recipeId     Int
+  ingredientId Int
+  quantity     Float
+  unit         String
+  recipe       Recipe     @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id])
+
+  @@unique([recipeId, ingredientId])
+  @@index([recipeId])
+  @@index([ingredientId])
+}
+
+model RecipeStep {
+  id          Int    @id @default(autoincrement())
+  recipeId    Int
+  stepNumber  Int
+  instruction String
+  recipe      Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([recipeId, stepNumber])
+  @@index([recipeId])
+}
+
+model RecipeNutrition {
+  id          Int     @id @default(autoincrement())
+  recipeId    Int     @unique
+  proteins    Float
+  carbs       Float
+  fats        Float
+  calories    Float?
+  servingSize String?
+  recipe      Recipe  @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+}
+
+model Unit {
+  id         Int     @id @default(autoincrement())
+  name       String  @unique
+  shortName  String  @unique
+  type       String
+  baseUnit   String?
+  conversion Float?
+}

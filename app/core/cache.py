@@ -12,9 +12,9 @@ All functions are async and resilient: on Redis errors they log and return safe 
 import os
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .redis_client import get_redis
+from .redis_client import get_redis, get_sync_redis
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,16 @@ def _user_memories_key(user_id: str) -> str:
 def _user_profile_key(user_id: str) -> str:
     return f"user:profile:{user_id}"
 
+def _user_training_program_key(user_id: str) -> str:
+    return f"user:training_program:{user_id}"
+
 
 # --- User Memories Cache ---
 USER_MEMORIES_TTL_SECONDS = int(os.getenv("USER_MEMORIES_TTL_SECONDS", "600"))  # 10 minutes
 
 # --- User Profile Cache ---
 USER_PROFILE_TTL_SECONDS = int(os.getenv("USER_PROFILE_TTL_SECONDS", "3600"))  # 1 hour
+USER_TRAINING_PROGRAM_TTL_SECONDS = int(os.getenv("USER_TRAINING_PROGRAM_TTL_SECONDS", "900"))  # 15 minutes
 
 async def get_cached_user_memories(user_id: str) -> List[Dict[str, Any]]:
     """Retrieve cached user memories from Redis."""
@@ -113,6 +117,47 @@ async def cache_user_profile(user_id: str, profile: Dict[str, Any]) -> None:
         logger.debug(f"👤 Cached profile for user {user_id} (TTL: {USER_PROFILE_TTL_SECONDS}s)")
     except Exception as e:
         logger.warning(f"User profile cache write failed for {user_id}: {e}")
+
+
+async def get_cached_training_program(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve cached training program summary from Redis."""
+    try:
+        r = get_redis()
+        key = _user_training_program_key(user_id)
+        raw_data = await r.get(key)
+        if raw_data:
+            program = json.loads(raw_data)
+            logger.debug(f"🏋️ Cache HIT - Retrieved training program for user {user_id}")
+            return program
+        logger.debug(f"💨 Cache MISS - No training program cached for user {user_id}")
+        return None
+    except Exception as e:
+        logger.warning(f"Training program cache read failed for {user_id}: {e}")
+        return None
+
+
+async def cache_user_training_program(user_id: str, program: Dict[str, Any]) -> None:
+    """Store training program summary in Redis cache with TTL."""
+    try:
+        r = get_redis()
+        key = _user_training_program_key(user_id)
+        payload = json.dumps(program, ensure_ascii=False)
+        await r.set(key, payload, ex=USER_TRAINING_PROGRAM_TTL_SECONDS)
+        logger.debug(
+            f"🏋️ Cached training program for user {user_id} (TTL: {USER_TRAINING_PROGRAM_TTL_SECONDS}s)"
+        )
+    except Exception as e:
+        logger.warning(f"Training program cache write failed for {user_id}: {e}")
+
+
+def invalidate_user_training_program_cache(user_id: str) -> None:
+    """Synchronous helper to invalidate cached training program (used from threads)."""
+    try:
+        redis_client = get_sync_redis()
+        redis_client.delete(_user_training_program_key(user_id))
+        logger.debug(f"🏋️ Invalidated training program cache for user {user_id}")
+    except Exception as exc:
+        logger.warning(f"Failed to invalidate training program cache for {user_id}: {exc}")
 
 
 # --- Conversation history ---

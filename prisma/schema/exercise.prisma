@@ -1,0 +1,99 @@
+model Exercise {
+  id                   Int                           @id @default(autoincrement())
+  description          String?
+  videoUrl             String?
+  categoryId           Int
+  createdAt            DateTime                      @default(now())
+  deleted              Boolean                       @default(false)
+  duration             Int?
+  embedCode            String
+  levelId              Int
+  posterUrl            String?
+  state                String                        @default("inspecting")
+  thumbnailUrl         String
+  title                String
+  videoExternalId      String                        @unique
+  videoSize            Int
+  category             ExerciseCategory              @relation(fields: [categoryId], references: [id])
+  level                Level                         @relation(fields: [levelId], references: [id])
+  templateExercises    TrainingDayExerciseTemplate[]
+  userProgramExercises UserProgramExercise[]
+  equipments           ExerciseEquipment[]
+  tags                 ExerciseTag[]
+  exerciseLogs         ExerciseLog[]
+  collections          CollectionExercise[]
+  bookmarks            ExerciseBookmark[]
+
+  @@index([categoryId])
+  @@index([levelId])
+}
+
+model Collections {
+  id          Int                  @id @default(autoincrement())
+  name        String
+  description String
+  createdBy   String?             // Make it optional for existing records
+  exercises   CollectionExercise[]
+}
+
+model CollectionExercise {
+  id           Int         @id @default(autoincrement())
+  collectionId Int
+  exerciseId   Int
+  order        Int?
+  collection   Collections @relation(fields: [collectionId], references: [id])
+  exercise     Exercise    @relation(fields: [exerciseId], references: [id])
+
+  @@unique([collectionId, exerciseId])
+  @@index([collectionId])
+  @@index([exerciseId])
+}
+
+model Level {
+  id          Int        @id @default(autoincrement())
+  description String
+  value       String     @unique
+  exercises   Exercise[]
+}
+
+model ExerciseCategory {
+  id          Int        @id @default(autoincrement())
+  value       String     @unique
+  description String
+  exercises   Exercise[]
+}
+
+model Equipment {
+  id          Int                 @id @default(autoincrement())
+  description String
+  value       String              @unique
+  exercises   ExerciseEquipment[]
+}
+
+model ExerciseEquipment {
+  id          Int       @id @default(autoincrement())
+  exerciseId  Int
+  equipmentId Int
+  exercise    Exercise  @relation(fields: [exerciseId], references: [id])
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  @@index([exerciseId])
+  @@index([equipmentId])
+}
+
+model Tag {
+  id        Int           @id @default(autoincrement())
+  name      String        @unique
+  exercises ExerciseTag[]
+}
+
+model ExerciseTag {
+  id         Int      @id @default(autoincrement())
+  exerciseId Int
+  tagId      Int
+  exercise   Exercise @relation(fields: [exerciseId], references: [id])
+  tag        Tag      @relation(fields: [tagId], references: [id])
+
+  @@index([exerciseId])
+  @@index([tagId])
+}

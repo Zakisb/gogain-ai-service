@@ -1,0 +1,268 @@
+model User {
+  // Primary identifiers
+  id          Int    @id @default(autoincrement())
+  clerkUserId String @unique
+  email       String @unique
+  stripeCustomerId String? @unique
+  // Basic profile info
+  firstName   String?
+  lastName    String?
+  avatar      Int?
+  avatarImage Image?  @relation(fields: [avatar], references: [id])
+
+  // Organization related
+  organizationId            Int?
+  organization              Organization?  @relation(fields: [organizationId], references: [id])
+  representativeFor         Organization[] @relation("Representative")
+  // Status flags
+  onboarded                 Boolean        @default(false)
+  licenseId                 Int?
+  appleHealthKitPromptShown Boolean        @default(false)
+  googleFitPromptShown      Boolean        @default(false)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+
+  // AI related
+  openaiThread Thread?
+
+  // User data
+  userRoles       UserRole[]
+  userProfile     UserProfile?
+  userPermissions UserPermission[]
+  userAnswers     UserQuestionAnswer[]
+
+  // Health & Fitness
+  painAssessments    PainAssessment[]
+  weightAssessments  WeightAssessment[]
+  fitnessAssessments FitnessAssessment[]
+  dailyHealthMetrics UserDailyHealthMetric[]
+  activities         UserActivity[]
+
+  // Training & Programs
+  userPrograms    UserTrainingProgram[]
+  createdPrograms TrainingProgramTemplate[] @relation("ProgramCreator")
+  dietPlans       DietPlan[]
+
+  // Coaching
+  coachingSessions     CoachingSession[]            @relation("Coach")
+  participatedSessions CoachingSessionParticipant[]
+
+  // Club related
+  clubs               ClubMember[]
+  createdClubs        Club[]           @relation("ClubCreator")
+  createdClubTeams    ClubTeam[]       @relation("ClubTeamCreator")
+  clubTeamMemberships ClubTeamMember[]
+  invitedMembers      ClubMember[]     @relation("Invitations")
+
+  // Challenge related
+  challengeNews          ChallengeNews[]
+  createdChallenges      Challenge[]            @relation("ChallengeCreator")
+  participatedChallenges ChallengeParticipant[]
+
+  // Organization invites
+  sentInvites   OrganizationInvite[] @relation("SentInvites")
+  accountTypeId Int                  @default(1)
+  accountType   UserAccountType      @relation(fields: [accountTypeId], references: [id])
+
+  deleted           Boolean            @default(false)
+  recipeBookmarks   RecipeBookmark[]
+  exerciseBookmarks ExerciseBookmark[]
+
+  jobTitleId              Int?
+  jobTitle                JobTitle?                @relation(fields: [jobTitleId], references: [id])
+  userHealthDataProviders UserHealthDataProvider[]
+  sdkConnection           SDKConnection[]
+  // Indexes
+
+  subscriptions     Subscription[]
+  subscriptionSeats SubscriptionSeat[]
+
+  paymentMethods        PaymentMethod[]
+
+
+  @@index([organizationId])
+  @@index([clerkUserId])
+  @@index([email])
+  @@index([avatar])
+  @@index([accountTypeId])
+  @@index([jobTitleId])
+}
+
+model JobTitle {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique // CEO, CFO, etc
+  name        String // "Directeur Général", etc
+  description String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int? // For display ordering
+  users       User[] // Relation to users
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([code])
+}
+
+model UserAccountType {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String?
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([code])
+}
+
+model UserProfile {
+  id                           Int       @id @default(autoincrement())
+  userId                       Int       @unique
+  birthDate                    DateTime?
+  gender                       String?
+  height                       Float?
+  weight                       Float?
+  goal                         String?
+  generalLifestyleHealthHabits String?
+  nutrition                    String?
+  lifestyle                    String?
+  dailyEnvironmentHabits       String?
+  historyCurrentHealth         String?
+  heightUnit                   String?
+  weightUnit                   String?
+  availableEquipments         String[]
+  desiredTrainingFrequency   String?
+  fitnessLevel               String?
+  user                         User      @relation(fields: [userId], references: [id])
+}
+
+model PainAssessment {
+  id               Int       @id @default(autoincrement())
+  userId           Int
+  assessmentDate   DateTime  @default(now())
+  location         String
+  duration         String
+  intensity        Int
+  medicationTaken  Boolean
+  medicationRelief Boolean?
+  timeOfDay        TimeOfDay
+  affectsSleep     Boolean
+  notes            String?
+  user             User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model WeightAssessment {
+  id             Int      @id @default(autoincrement())
+  userId         Int
+  assessmentDate DateTime @default(now())
+  weight         Float
+  notes          String?
+  user           User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model FitnessAssessment {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  assessmentDate   DateTime @default(now())
+  cardioEndurance  Int?
+  muscularStrength Int?
+  flexibility      Int?
+  balance          Int?
+  notes            String?
+  user             User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model UserRole {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  roleId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  role      Role     @relation(fields: [roleId], references: [id])
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+  @@index([userId])
+}
+
+model Role {
+  id                 Int                  @id @default(autoincrement())
+  code               String               @unique
+  name               String
+  description        String?
+  userRoles          UserRole[]
+  isActive           Boolean              @default(true)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  category           RoleCategory?
+  rolePermissions    RolePermission[]
+  contactRole        OrganizationInvite[] @relation("ContactRole")
+  representativeRole OrganizationInvite[] @relation("RepresentativeRole")
+
+  @@index([code])
+}
+
+model RolePermission {
+  id           Int        @id @default(autoincrement())
+  roleId       Int
+  permissionId Int
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@index([roleId])
+  @@index([permissionId])
+}
+
+model Permission {
+  id              Int              @id @default(autoincrement())
+  permission      String           @unique
+  displayName     String
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+}
+
+model UserPermission {
+  id           Int        @id @default(autoincrement())
+  userId       Int
+  permissionId Int
+  granted      Boolean    @default(false)
+  user         User       @relation(fields: [userId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@index([userId])
+  @@index([permissionId])
+}
+
+enum Goal {
+  PAIN_MANAGEMENT
+  WEIGHT_LOSS
+  FITNESS_IMPROVEMENT
+}
+
+enum HeightUnit {
+  cm
+  inches
+}
+
+enum WeightUnit {
+  kg
+  lbs
+}
+
+enum TimeOfDay {
+  MORNING
+  DAY
+  EVENING
+}
+
+enum RoleCategory {
+  SYSTEM
+  ENTERPRISE
+  INDIVIDUAL
+}

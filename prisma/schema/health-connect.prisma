@@ -1,0 +1,82 @@
+model HealthDataProvider {
+  id           Int          @id @default(autoincrement())
+  code         String       @unique
+  name         String
+  identifier   String       @unique
+  platform     Platform
+  providerType ProviderType
+  isActive     Boolean      @default(true)
+
+  // Relations with consistent naming
+  activities              UserActivity[]
+  userHealthDataProviders UserHealthDataProvider[]
+  sdkConnection           SDKConnection[]
+  dailyHealthMetrics      UserDailyHealthMetric[]
+}
+
+model UserHealthDataProvider {
+  id                   Int        @id @default(autoincrement())
+  userId               Int
+  healthDataProviderId Int
+  lastSync             DateTime
+  syncAnchor           String?
+  status               SyncStatus @default(NOT_CONFIGURED)
+
+  user               User               @relation(fields: [userId], references: [id])
+  healthDataProvider HealthDataProvider @relation(fields: [healthDataProviderId], references: [id])
+
+  @@unique([userId, healthDataProviderId])
+  @@index([userId])
+  @@index([healthDataProviderId])
+}
+
+model HealthDataRecordingMethod {
+  id         Int            @id @default(autoincrement())
+  code       String         @unique
+  name       String
+  isActive   Boolean        @default(true)
+  // Relations
+  activities UserActivity[]
+}
+
+model SDKConnection {
+  id                   Int           @id @default(autoincrement())
+  userId               Int
+  healthDataProviderId Int
+  lastSync             DateTime?
+  status               SDKAuthStatus
+  accessToken          String?
+  refreshToken         String?
+  expiresAt            DateTime?
+
+  user               User               @relation(fields: [userId], references: [id])
+  healthDataProvider HealthDataProvider @relation(fields: [healthDataProviderId], references: [id])
+
+  @@unique([userId, healthDataProviderId])
+  @@index([userId])
+  @@index([healthDataProviderId])
+}
+
+enum ProviderType {
+  HEALTH_PLATFORM_APP
+  DIRECT_SDK
+}
+
+enum SyncStatus {
+  NOT_CONFIGURED
+  DENIED
+  GRANTED
+  ERROR
+}
+
+enum SDKAuthStatus {
+  NOT_CONFIGURED
+  DISCONNECTED
+  CONNECTED
+  FAILED
+}
+
+enum Platform {
+  IOS
+  ANDROID
+}

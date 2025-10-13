@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 import os
 
 from llama_index.core.agent.workflow import AgentWorkflow, FunctionAgent
@@ -252,12 +252,25 @@ class EnhancedAgentWorkflow(AgentWorkflow):
         logger.info(f"🔧 Final tool count for {current_agent_name}: {len(tools)}")
         return self._ensure_tools_are_async(tools)
 
-    async def run(self, user_msg: str, router_context=None, agent_context=None, user_id=None, **kwargs):
+    def _emit_training_context(self) -> Optional[str]:
+        """Return training context once when PersonalTrainingAgent is active."""
+        if (
+            getattr(self, "_training_context", None)
+            and self._current_agent == "PersonalTrainingAgent"
+            and not getattr(self, "_training_context_emitted", False)
+        ):
+            self._training_context_emitted = True
+            return self._training_context
+        return None
+
+    async def run(self, user_msg: str, router_context=None, agent_context=None, user_id=None, training_context=None, **kwargs):
         """Custom run method that handles agent transitions with separate contexts."""
         logger.info(f"🚀 EnhancedAgentWorkflow starting with root agent: {self.root_agent}")
 
         # Store user_id for tools to access programmatically
         self._user_id = user_id or "unknown_user"
+        self._training_context = training_context
+        self._training_context_emitted = False
 
         # CRITICAL: Reset get_tools call counter for new workflow run
         self._get_tools_call_count = {}
@@ -320,13 +333,25 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                     from llama_index.core.memory import ChatMemoryBuffer
                     from llama_index.core.llms import ChatMessage
                     memory = ChatMemoryBuffer.from_defaults()
+                    training_snapshot = self._emit_training_context()
+                    if training_snapshot:
+                        training_msg = ChatMessage(role="system", content=training_snapshot)
+                        memory.put(training_msg)
                     for msg in self._agent_context_array[:-1]:  # All except last message
                         chat_msg = ChatMessage(role=msg["role"], content=msg["content"])
                         memory.put(chat_msg)
                     result = await super().run(user_msg=user_msg, memory=memory, **kwargs)
                 else:
-                    # Fallback to string-based execution
-                    result = await super().run(user_msg=user_msg, **kwargs)
+                    training_snapshot = self._emit_training_context()
+                    if training_snapshot:
+                        from llama_index.core.memory import ChatMemoryBuffer
+                        from llama_index.core.llms import ChatMessage
+                        memory = ChatMemoryBuffer.from_defaults()
+                        memory.put(ChatMessage(role="system", content=training_snapshot))
+                        result = await super().run(user_msg=user_msg, memory=memory, **kwargs)
+                    else:
+                        # Fallback to string-based execution
+                        result = await super().run(user_msg=user_msg, **kwargs)
             finally:
                 # Restore original root agent
                 self.root_agent = original_root
@@ -352,12 +377,14 @@ class EnhancedAgentWorkflow(AgentWorkflow):
             result._handling_agent = self._current_agent
         return result
 
-    async def run_with_streaming(self, user_msg: str, router_context=None, agent_context=None, user_id=None, **kwargs):
+    async def run_with_streaming(self, user_msg: str, router_context=None, agent_context=None, user_id=None, training_context=None, **kwargs):
         """Custom streaming run method that handles agent transitions with separate contexts."""
         logger.info(f"🚀 EnhancedAgentWorkflow starting with STREAMING for root agent: {self.root_agent}")
 
         # Store user_id for tools to access programmatically
         self._user_id = user_id or "unknown_user"
+        self._training_context = training_context
+        self._training_context_emitted = False
 
         # CRITICAL: Reset get_tools call counter for new workflow run
         self._get_tools_call_count = {}
@@ -458,6 +485,10 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                     system_prompt = getattr(agent_instance, 'system_prompt', None)
                     if system_prompt:
                         messages.append({"role": "system", "content": system_prompt})
+
+                    training_snapshot = self._emit_training_context()
+                    if training_snapshot:
+                        messages.append({"role": "system", "content": training_snapshot})
 
                     # Add conversation history
                     if getattr(self, "_agent_context_array", None):
@@ -581,11 +612,11 @@ class EnhancedAgentWorkflow(AgentWorkflow):
                                         logger.info(f"⚙️ Calling tool: {tool_name}")
 
                                         # Inject user_id programmatically for training tools
-                                        if tool_name in ['check_user_training_program', 'create_training_program', 'get_user_training_program']:
+                                        if tool_name in ['create_training_program', 'save_fitness_goal_assessment']:
                                             tool_args['user_id'] = str(self._user_id)
                                             logger.info(f"💉 Injected user_id={self._user_id} into {tool_name}")
 
-                                        result = tool_fn(**tool_args)
+                                        result = await asyncio.to_thread(tool_fn, **tool_args)
                                         tool_result = str(result)
                                     else:
                                         tool_result = f"Error: Unknown tool {tool_name}"

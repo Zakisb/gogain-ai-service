@@ -1,0 +1,9 @@
+model SeedHistory {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  status    String   @default("success")
+  error     String?
+  duration  Int?
+  file      String?
+  createdAt DateTime @default(now())
+}

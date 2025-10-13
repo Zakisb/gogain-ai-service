@@ -1,0 +1,233 @@
+model Club {
+  id             Int           @id @default(autoincrement())
+  name           String
+  description    String?
+  isOpen         Boolean       @default(false)
+  creatorId      Int?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  imageId        Int?
+  deletedAt      DateTime?
+  isDeleted      Boolean       @default(false)
+  creator        User?         @relation("ClubCreator", fields: [creatorId], references: [id])
+  members        ClubMember[]
+  challenges     Challenge[]
+  teams          ClubTeam[]
+  image          Image?        @relation(fields: [imageId], references: [id])
+  organizationId Int? // Add this field
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([creatorId])
+  @@index([imageId])
+}
+
+model ClubMember {
+  id           Int       @id @default(autoincrement())
+  userId       Int
+  clubId       Int
+  joinedAt     DateTime? @db.Timestamp(6)
+  isActive     Boolean?  @default(true)
+  leftAt       DateTime? @db.Timestamp(6)
+  showClubNews Boolean?  @default(false)
+  invitedAt    DateTime? @db.Timestamp(6)
+  invitedById  Int?
+  user         User      @relation(fields: [userId], references: [id])
+  club         Club      @relation(fields: [clubId], references: [id])
+  invitedBy    User?     @relation("Invitations", fields: [invitedById], references: [id])
+
+  @@unique([userId, clubId])
+  @@index([clubId])
+  @@index([invitedById])
+  @@index([userId])
+}
+
+model ClubTeam {
+  id           Int                        @id @default(autoincrement())
+  name         String?
+  description  String?
+  clubId       Int
+  imageId      Int?
+  creatorId    Int?
+  isDeleted    Boolean                    @default(false)
+  isActive     Boolean                    @default(true)
+  createdat    DateTime?                  @db.Timestamp(6)
+  deletedat    DateTime?                  @db.Timestamp(6)
+  updatedat    DateTime?                  @db.Timestamp(6)
+  club         Club                       @relation(fields: [clubId], references: [id])
+  creator      User?                      @relation("ClubTeamCreator", fields: [creatorId], references: [id])
+  members      ClubTeamMember[]
+  participants ChallengeTeamParticipant[]
+  image        Image?                     @relation(fields: [imageId], references: [id])
+
+  @@index([clubId])
+  @@index([creatorId])
+  @@index([imageId])
+}
+
+model ClubTeamMember {
+  id       Int       @id @default(autoincrement())
+  userId   Int
+  teamId   Int
+  joinedAt DateTime  @default(now())
+  isActive Boolean   @default(true)
+  leftAt   DateTime?
+  user     User      @relation(fields: [userId], references: [id])
+  team     ClubTeam  @relation(fields: [teamId], references: [id])
+
+  @@unique([userId, teamId])
+  @@index([userId])
+  @@index([teamId])
+}
+
+model Challenge {
+  id                     Int                         @id @default(autoincrement())
+  name                   String
+  description            String?
+  creatorId              Int?
+  clubId                 Int?
+  isPublic               Boolean                     @default(false)
+  goalTypeId             Int
+  goalValue              Float?
+  startDate              DateTime
+  endDate                DateTime
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  competitionTypeId      Int
+  imageId                Int?
+  prizeColorScheme       String?
+  prizeEngraving         String?
+  prizeTypeId            Int?
+  isDeleted              Boolean                     @default(false)
+  milestoneTypeId        Int?
+  statusId               Int?
+  creator                User?                       @relation("ChallengeCreator", fields: [creatorId], references: [id])
+  club                   Club?                       @relation(fields: [clubId], references: [id])
+  individualParticipants ChallengeParticipant[]      @relation("IndividualParticipants")
+  teamParticipants       ChallengeTeamParticipant[]
+  news                   ChallengeNews[]
+  goalType               ChallengeGoalType           @relation(fields: [goalTypeId], references: [id])
+  competitionType        ChallengeCompetitionType    @relation(fields: [competitionTypeId], references: [id])
+  prizeType              ChallengePrizeType?         @relation(fields: [prizeTypeId], references: [id])
+  image                  Image?                      @relation(fields: [imageId], references: [id])
+  milestoneType          ChallengeGoalTypeMilesones? @relation(fields: [milestoneTypeId], references: [id])
+  status                 ChallengeStatus?            @relation(fields: [statusId], references: [id])
+
+  @@index([creatorId])
+  @@index([clubId])
+  @@index([goalTypeId])
+  @@index([competitionTypeId])
+  @@index([imageId])
+  @@index([prizeTypeId])
+  @@index([milestoneTypeId])
+  @@index([statusId])
+}
+
+model ChallengeStatus {
+  id          Int         @id @default(autoincrement())
+  name        String      @unique
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  challenges  Challenge[]
+}
+
+model ChallengeGoalType {
+  id          Int                          @id @default(autoincrement())
+  name        String                       @unique
+  description String?
+  createdAt   DateTime                     @default(now())
+  updatedAt   DateTime                     @updatedAt
+  value       String                       @unique
+  challenges  Challenge[]
+  milestones  ChallengeGoalTypeMilesones[]
+}
+
+model ChallengeGoalTypeMilesones {
+  id              Int               @id @default(autoincrement())
+  description     String
+  measurementType String
+  goalTypeId      Int
+  goalType        ChallengeGoalType @relation(fields: [goalTypeId], references: [id])
+  challenges      Challenge[]
+
+  @@index([goalTypeId])
+}
+
+model ChallengePrizeType {
+  id          Int         @id @default(autoincrement())
+  value       String      @unique
+  displayName String
+  challenges  Challenge[]
+}
+
+model ChallengeCompetitionType {
+  id          Int         @id @default(autoincrement())
+  value       String      @unique
+  name        String      @unique
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  challenges  Challenge[]
+}
+
+model ChallengeParticipant {
+  id          Int       @id @default(autoincrement())
+  userId      Int
+  challengeId Int
+  progress    Float     @default(0)
+  joinedAt    DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id])
+  challenge   Challenge @relation("IndividualParticipants", fields: [challengeId], references: [id])
+
+  @@unique([userId, challengeId])
+  @@index([userId])
+  @@index([challengeId])
+}
+
+model ChallengeTeamParticipant {
+  id          Int       @id @default(autoincrement())
+  teamId      Int
+  challengeId Int
+  progress    Float     @default(0)
+  joinedAt    DateTime  @default(now())
+  team        ClubTeam  @relation(fields: [teamId], references: [id])
+  challenge   Challenge @relation(fields: [challengeId], references: [id])
+
+  @@unique([teamId, challengeId])
+  @@index([teamId])
+  @@index([challengeId])
+}
+
+model ChallengeNews {
+  id            Int       @id @default(autoincrement())
+  challengeId   Int
+  title         String
+  content       String
+  type          NewsType
+  relatedUserId Int?
+  createdAt     DateTime  @default(now())
+  challenge     Challenge @relation(fields: [challengeId], references: [id])
+  relatedUser   User?     @relation(fields: [relatedUserId], references: [id])
+
+  @@index([challengeId])
+  @@index([relatedUserId])
+}
+
+enum NewsType {
+  ACHIEVEMENT
+  MILESTONE
+  WINNER_ANNOUNCEMENT
+  CHALLENGE_START
+  CHALLENGE_END
+}
+
+enum CompetitionType {
+  INDIVIDUAL
+  TEAM
+}
+
+enum GoalType {
+  PROGRESS
+  MOBILITY
+}

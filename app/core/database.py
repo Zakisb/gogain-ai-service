@@ -1,217 +1,359 @@
-"""Database client for PostgreSQL using psycopg2 with connection pooling.
+"""Database helpers built on top of Prisma.
 
-This module provides a simple connection pool for accessing the PostgreSQL database
-shared with the Node.js service.
+This module preserves the legacy helper signatures (execute_query, execute_insert,
+etc.) while delegating all database access through the shared Prisma client.  A
+dedicated background event loop keeps the Prisma connection warm, allowing the
+rest of the codebase to continue using synchronous helpers from worker threads
+without blocking the main asyncio loop.
 """
 
-import os
+from __future__ import annotations
+
 import logging
-from typing import Optional, List, Dict, Any
+import os
 from contextlib import contextmanager
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
+
+from prisma import Prisma
+
+from app.core.prisma_client import (
+    disconnect_client,
+    ensure_client_connected,
+    run_async,
+)
 
 logger = logging.getLogger(__name__)
 
-# Global connection pool
-_connection_pool: Optional[pool.SimpleConnectionPool] = None
+T = TypeVar("T")
 
 
-def get_database_url() -> str:
-    """Get DATABASE_URL from environment and clean it for psycopg2.
+# --------------------------------------------------------------------------- #
+# Internal helpers                                                            #
+# --------------------------------------------------------------------------- #
 
-    Removes Prisma-specific query parameters like ?schema=public that psycopg2 doesn't support.
-    """
-    from app.core.config import os
-    from dotenv import load_dotenv
-    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+def _convert_placeholders(query: str, params: Sequence[Any]) -> Tuple[str, Sequence[Any]]:
+    """Convert legacy %s placeholders to PostgreSQL $1..$n format."""
+    if not params:
+        return query, params
 
-    # Load .env if not already loaded
-    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
-    load_dotenv(dotenv_path=dotenv_path)
+    parts = query.split("%s")
+    if len(parts) == 1:
+        return query, params
 
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        raise ValueError("DATABASE_URL not found in environment variables")
+    rebuilt: List[str] = []
+    for idx, chunk in enumerate(parts):
+        rebuilt.append(chunk)
+        if idx < len(parts) - 1:
+            rebuilt.append(f"${idx + 1}")
 
-    # Parse the URL
-    parsed = urlparse(database_url)
-
-    # Remove Prisma-specific query parameters (schema, etc.)
-    if parsed.query:
-        query_params = parse_qs(parsed.query)
-        # Remove 'schema' parameter (Prisma-specific)
-        query_params.pop('schema', None)
-
-        # Rebuild query string without schema parameter
-        new_query = urlencode(query_params, doseq=True) if query_params else ''
-
-        # Rebuild URL
-        clean_url = urlunparse((
-            parsed.scheme,
-            parsed.netloc,
-            parsed.path,
-            parsed.params,
-            new_query,
-            parsed.fragment
-        ))
-        return clean_url
-
-    return database_url
+    return "".join(rebuilt), params
 
 
-def initialize_pool(minconn: int = 1, maxconn: int = 10) -> None:
-    """Initialize the database connection pool.
+async def _query_raw(
+    client: Prisma,
+    query: str,
+    params: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    stmt, values = _convert_placeholders(query, params)
+    if values:
+        result = await client.query_raw(stmt, *values)
+    else:
+        result = await client.query_raw(stmt)
+    return list(result or [])
 
-    Args:
-        minconn: Minimum number of connections in the pool
-        maxconn: Maximum number of connections in the pool
-    """
-    global _connection_pool
 
-    if _connection_pool is not None:
-        logger.info("Database pool already initialized")
-        return
+async def _execute_raw(
+    client: Prisma,
+    query: str,
+    params: Sequence[Any],
+) -> int:
+    stmt, values = _convert_placeholders(query, params)
+    if values:
+        return await client.execute_raw(stmt, *values)
+    return await client.execute_raw(stmt)
 
-    try:
-        database_url = get_database_url()
-        _connection_pool = pool.SimpleConnectionPool(
-            minconn,
-            maxconn,
-            database_url
-        )
-        logger.info(f"✅ Database connection pool initialized (min={minconn}, max={maxconn})")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize database pool: {e}")
-        raise
+
+async def _execute_insert(
+    client: Prisma,
+    query: str,
+    params: Sequence[Any],
+) -> Optional[Any]:
+    rows = await _query_raw(client, query, params)
+    if not rows:
+        return None
+    first_row = rows[0]
+    if not first_row:
+        return None
+    # Return the first column value (matches legacy psycopg2 behaviour)
+    return next(iter(first_row.values()))
+
+
+async def _execute_query(
+    client: Prisma,
+    query: str,
+    params: Sequence[Any],
+    fetch_one: bool,
+    fetch_all: bool,
+) -> Optional[Any]:
+    rows = await _query_raw(client, query, params)
+    if fetch_one:
+        return rows[0] if rows else None
+    if fetch_all:
+        return rows
+    return None
+
+
+def _run_coroutine(coro: Awaitable[T]) -> T:
+    ensure_client_connected()
+    return run_async(coro)
+
+
+# --------------------------------------------------------------------------- #
+# Public helpers (compatibility layer)                                        #
+# --------------------------------------------------------------------------- #
+
+def initialize_pool(minconn: int = 5, maxconn: int = 50) -> None:
+    """Maintain backwards compatibility with legacy API."""
+    ensure_client_connected()
+    logger.info("✅ Prisma client ready (pool parameters ignored)")
 
 
 def close_pool() -> None:
-    """Close all connections in the pool."""
-    global _connection_pool
-
-    if _connection_pool is not None:
-        _connection_pool.closeall()
-        _connection_pool = None
-        logger.info("Database connection pool closed")
+    """Close Prisma client and background loop."""
+    disconnect_client()
 
 
 @contextmanager
 def get_db_connection():
-    """Context manager to get a database connection from the pool.
+    """Connection context placeholder for legacy scripts.
 
-    Usage:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users")
-            results = cursor.fetchall()
-
-    Yields:
-        psycopg2.connection: Database connection
+    Prisma hides individual connections; attempting to request a raw connection
+    is not supported.  For backwards-compatibility we raise a clear error when
+    legacy code still attempts to use low-level cursors.
     """
-    global _connection_pool
-
-    if _connection_pool is None:
-        initialize_pool()
-
-    conn = None
-    try:
-        conn = _connection_pool.getconn()
-        yield conn
-        conn.commit()
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.error(f"Database error: {e}")
-        raise
-    finally:
-        if conn:
-            _connection_pool.putconn(conn)
+    raise RuntimeError(
+        "Direct connection access is no longer supported. Please refactor the "
+        "caller to use app.core.database helpers (execute_query, run_transaction, "
+        "etc.) instead of raw cursors."
+    )
+    yield  # pragma: no cover
 
 
 def execute_query(
     query: str,
-    params: Optional[tuple] = None,
+    params: Optional[Sequence[Any]] = None,
     fetch_one: bool = False,
-    fetch_all: bool = True
+    fetch_all: bool = True,
 ) -> Optional[Any]:
-    """Execute a SQL query and return results.
-
-    Args:
-        query: SQL query string
-        params: Query parameters (optional)
-        fetch_one: If True, fetch only one result
-        fetch_all: If True, fetch all results (default)
-
-    Returns:
-        Query results as dict or list of dicts, or None
-    """
-    with get_db_connection() as conn:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(query, params)
-
-        if fetch_one:
-            result = cursor.fetchone()
-            return dict(result) if result else None
-        elif fetch_all:
-            results = cursor.fetchall()
-            return [dict(row) for row in results]
-        else:
-            return None
+    params = tuple(params or ())
+    client = ensure_client_connected()
+    return _run_coroutine(_execute_query(client, query, params, fetch_one, fetch_all))
 
 
-def execute_insert(query: str, params: Optional[tuple] = None) -> Optional[int]:
-    """Execute an INSERT query and return the inserted ID.
-
-    Args:
-        query: SQL INSERT query string (should include RETURNING id)
-        params: Query parameters (optional)
-
-    Returns:
-        Inserted record ID or None
-    """
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        result = cursor.fetchone()
-        return result[0] if result else None
+def execute_insert(
+    query: str,
+    params: Optional[Sequence[Any]] = None,
+) -> Optional[Any]:
+    params = tuple(params or ())
+    client = ensure_client_connected()
+    return _run_coroutine(_execute_insert(client, query, params))
 
 
-def execute_update(query: str, params: Optional[tuple] = None) -> int:
-    """Execute an UPDATE query and return number of affected rows.
+def execute_update(
+    query: str,
+    params: Optional[Sequence[Any]] = None,
+) -> int:
+    params = tuple(params or ())
+    client = ensure_client_connected()
+    return _run_coroutine(_execute_raw(client, query, params))
 
-    Args:
-        query: SQL UPDATE query string
-        params: Query parameters (optional)
 
-    Returns:
-        Number of affected rows
-    """
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        return cursor.rowcount
+class TransactionAdapter:
+    """Helper passed into run_transaction callbacks."""
+
+    def __init__(self, tx_client):
+        self._tx = tx_client
+
+    async def query(
+        self,
+        query: str,
+        params: Optional[Sequence[Any]] = None,
+        fetch_one: bool = False,
+        fetch_all: bool = True,
+    ) -> Optional[Any]:
+        return await _execute_query(
+            self._tx, query, tuple(params or ()), fetch_one, fetch_all
+        )
+
+    async def insert(
+        self,
+        query: str,
+        params: Optional[Sequence[Any]] = None,
+    ) -> Optional[Any]:
+        return await _execute_insert(self._tx, query, tuple(params or ()))
+
+    async def execute(
+        self,
+        query: str,
+        params: Optional[Sequence[Any]] = None,
+    ) -> int:
+        return await _execute_raw(self._tx, query, tuple(params or ()))
+
+
+def run_transaction(
+    callback: Callable[[TransactionAdapter], Awaitable[T]],
+) -> T:
+    """Execute the callback inside a Prisma transaction."""
+
+    async def _runner() -> T:
+        client = ensure_client_connected()
+        async with client.tx() as tx:
+            adapter = TransactionAdapter(tx)
+            return await callback(adapter)
+
+    return _run_coroutine(_runner())
+
+
+# --------------------------------------------------------------------------- #
+# Query helpers used by the application                                       #
+# --------------------------------------------------------------------------- #
+
+def get_database_url() -> str:
+    """Keep legacy helper for diagnostics."""
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise ValueError("DATABASE_URL not found in environment variables")
+    return database_url
 
 
 def get_user_profile(user_id: int) -> Optional[Dict[str, Any]]:
-    """Fetch user profile from database.
-
-    Args:
-        user_id: User ID
-
-    Returns:
-        User profile dict with firstName, lastName, email, etc. or None
-    """
+    """Fetch user profile from database."""
     try:
         query = """
-            SELECT id, email, "firstName", "lastName", avatar, onboarded, "createdAt"
-            FROM "User"
-            WHERE id = %s AND deleted = false
+            SELECT
+                u.id,
+                u.email,
+                u."firstName",
+                u."lastName",
+                u.avatar,
+                u.onboarded,
+                u."createdAt",
+                up."birthDate",
+                up.gender,
+                up.height,
+                up.weight,
+                up.goal,
+                up."fitnessLevel",
+                up."availableEquipments",
+                up."desiredTrainingFrequency",
+                up."heightUnit",
+                up."weightUnit"
+            FROM "User" u
+            LEFT JOIN "UserProfile" up ON u.id = up."userId"
+            WHERE u.id = %s AND u.deleted = false
             LIMIT 1
         """
-        result = execute_query(query, (user_id,), fetch_one=True)
-        return result
-    except Exception as e:
-        logger.error(f"Failed to fetch user profile for user_id={user_id}: {e}")
+        return execute_query(query, (user_id,), fetch_one=True)
+    except Exception as exc:
+        logger.error(f"Failed to fetch user profile for user_id={user_id}: {exc}")
+        return None
+
+
+def get_user_training_program_overview(user_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch the most recent active training program with days and exercises."""
+    try:
+        def _to_iso(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+        query = """
+            SELECT
+                utp.id,
+                utp.name,
+                utp.description,
+                utp.duration,
+                utp.frequency,
+                utp."startDate",
+                utp."endDate",
+                utp."createdAt",
+                utp.status AS program_status,
+                tpf.name AS focus_name,
+                td.id AS day_id,
+                td."dayNumber" AS day_number,
+                td.name AS day_name,
+                td.date AS day_date,
+                td.status AS day_status,
+                upe.id AS exercise_id,
+                e.title AS exercise_name,
+                e.description AS exercise_description,
+                upe."setsPlanned" AS sets_planned,
+                upe."repsPerSet" AS reps_per_set,
+                upe."restTimeBetweenSets" AS rest_time_seconds
+            FROM "UserTrainingProgram" utp
+            LEFT JOIN "TrainingProgramFocus" tpf ON utp."focusId" = tpf.id
+            LEFT JOIN "UserTrainingDay" td ON utp.id = td."userProgramId"
+            LEFT JOIN "UserProgramExercise" upe ON td.id = upe."userTrainingDayId"
+            LEFT JOIN "Exercise" e ON upe."exerciseId" = e.id
+            WHERE utp."userId" = %s AND utp.status = 'ACTIVE'
+            ORDER BY utp."createdAt" DESC, td."dayNumber", upe."orderInDay", upe.id
+            LIMIT 1000
+        """
+
+        rows = execute_query(query, (user_id,))
+        if not rows:
+            return None
+
+        program_row = rows[0]
+        program = {
+            "programId": program_row["id"],
+            "name": program_row.get("name"),
+            "description": program_row.get("description"),
+            "focus": program_row.get("focus_name"),
+            "status": program_row.get("program_status"),
+            "durationWeeks": program_row.get("duration"),
+            "frequencyPerWeek": program_row.get("frequency"),
+            "startDate": _to_iso(program_row.get("startDate")),
+            "endDate": _to_iso(program_row.get("endDate")),
+            "createdAt": _to_iso(program_row.get("createdAt")),
+            "trainingDays": [],
+        }
+
+        day_map: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            day_id = row.get("day_id")
+            if day_id is None:
+                continue
+
+            day_entry = day_map.get(day_id)
+            if not day_entry:
+                day_entry = {
+                    "dayId": day_id,
+                    "dayNumber": row.get("day_number"),
+                    "name": row.get("day_name"),
+                    "date": _to_iso(row.get("day_date")),
+                    "status": row.get("day_status"),
+                    "exercises": [],
+                }
+                day_map[day_id] = day_entry
+                program["trainingDays"].append(day_entry)
+
+            exercise_id = row.get("exercise_id")
+            if exercise_id is not None:
+                exercise_entry = {
+                    "exerciseId": exercise_id,
+                    "name": row.get("exercise_name"),
+                    "description": row.get("exercise_description"),
+                    "sets": row.get("sets_planned"),
+                    "reps": row.get("reps_per_set"),
+                    "restSeconds": row.get("rest_time_seconds"),
+                }
+                day_entry["exercises"].append(exercise_entry)
+
+        return program
+    except Exception as exc:
+        logger.error(f"Failed to fetch training program for user_id={user_id}: {exc}")
         return None

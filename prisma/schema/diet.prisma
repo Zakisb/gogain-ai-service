@@ -1,0 +1,85 @@
+model DietPlan {
+  id             Int        @id @default(autoincrement())
+  userId         Int
+  name           String?
+  description    String?
+  startDate      DateTime?
+  endDate        DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  dailyCalories  Float?
+  dailyCarbs     Float?
+  dailyFat       Float?
+  dailyProtein   Float?
+  targetCalories Float?
+  targetCarbs    Float?
+  targetFat      Float?
+  targetProtein  Float?
+  user           User       @relation(fields: [userId], references: [id])
+  mealPlans      MealPlan[]
+
+  @@index([userId])
+}
+
+model MealPlan {
+  id               Int             @id @default(autoincrement())
+  dietPlanId       Int
+  name             String
+  timeOfDay        DateTime
+  orderInDay       Int
+  carbs            Float?
+  fat              Float?
+  mealType         MealType
+  protein          Float?
+  mealPlanRecipeId Int?
+  vegetables       Json?
+  description      String?
+  dietPlan         DietPlan        @relation(fields: [dietPlanId], references: [id])
+  mealPlanFoods    MealPlanFood[]
+  mealPlanRecipe   MealPlanRecipe? @relation(fields: [mealPlanRecipeId], references: [id])
+
+  @@index([dietPlanId])
+  @@index([mealPlanRecipeId])
+}
+
+model Food {
+  id                Int            @id @default(autoincrement())
+  name              String
+  description       String
+  caloriesPer100g   Float
+  proteinPer100g    Float
+  carbsPer100g      Float
+  fatPer100g        Float
+  unitOfMeasurement String
+  mealPlanFoods     MealPlanFood[]
+
+  @@index([name])
+}
+
+model MealPlanFood {
+  id         Int      @id @default(autoincrement())
+  mealPlanId Int
+  foodId     Int
+  quantity   Float
+  mealPlan   MealPlan @relation(fields: [mealPlanId], references: [id])
+  food       Food     @relation(fields: [foodId], references: [id])
+
+  @@index([mealPlanId])
+  @@index([foodId])
+}
+
+model MealPlanRecipe {
+  id              Int        @id @default(autoincrement())
+  steps           String[]
+  difficultyLevel String?
+  preparationTime String?
+  tips            String?
+  mealPlans       MealPlan[]
+}
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  SNACK
+  DINNER
+}

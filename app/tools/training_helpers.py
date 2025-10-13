@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from openai import OpenAI
 
-from app.core.database import execute_query, execute_insert, get_db_connection
+from app.core.database import execute_query, execute_insert, run_transaction
 from app.core.config import OPENAI_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -256,84 +256,92 @@ def create_user_training_program(
         Dict with success status and message
     """
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        start_date = datetime.now().date()
+        duration_weeks = 8  # Default 8 weeks
+        end_date = start_date + timedelta(weeks=duration_weeks)
 
-            # Calculate dates
-            start_date = datetime.now().date()
-            duration_weeks = 8  # Default 8 weeks
-            end_date = start_date + timedelta(weeks=duration_weeks)
+        training_days = program_data.get("trainingDays", [])
+        frequency = len(training_days)
 
-            training_days = program_data.get("trainingDays", [])
-            frequency = len(training_days)
-
-            # Insert UserTrainingProgram
-            cursor.execute("""
+        async def _create(tx) -> Dict[str, Any]:
+            program_id = await tx.insert(
+                """
                 INSERT INTO "UserTrainingProgram"
                 (name, description, "userId", "focusId", duration, frequency, "startDate", "endDate")
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (
-                program_data.get("name", "Programme personnalisé"),
-                program_data.get("description", ""),
-                int(user_id),
-                focus_id,
-                duration_weeks,
-                frequency,
-                start_date,
-                end_date
-            ))
+                """,
+                (
+                    program_data.get("name", "Programme personnalisé"),
+                    program_data.get("description", ""),
+                    int(user_id),
+                    focus_id,
+                    duration_weeks,
+                    frequency,
+                    start_date,
+                    end_date,
+                ),
+            )
 
-            program_id = cursor.fetchone()[0]
+            if program_id is None:
+                raise RuntimeError("Failed to create UserTrainingProgram record")
+
             logger.info(f"✅ Created UserTrainingProgram with id={program_id}")
 
-            # Insert training days and exercises
             current_date = start_date
             for day_data in training_days:
                 day_number = day_data.get("dayNumber", 1)
                 day_name = day_data.get("name", f"Jour {day_number}")
 
-                cursor.execute("""
+                training_day_id = await tx.insert(
+                    """
                     INSERT INTO "UserTrainingDay"
                     ("userProgramId", "dayNumber", name, date, status)
                     VALUES (%s, %s, %s, %s, %s)
                     RETURNING id
-                """, (
-                    program_id,
-                    day_number,
-                    day_name,
-                    current_date,
-                    'PLANNED'
-                ))
+                    """,
+                    (
+                        program_id,
+                        day_number,
+                        day_name,
+                        current_date,
+                        "PLANNED",
+                    ),
+                )
 
-                training_day_id = cursor.fetchone()[0]
+                if training_day_id is None:
+                    raise RuntimeError("Failed to create UserTrainingDay record")
 
-                # Insert exercises for this day
                 for exercise_data in day_data.get("exercises", []):
-                    cursor.execute("""
+                    await tx.execute(
+                        """
                         INSERT INTO "UserProgramExercise"
                         ("userTrainingDayId", "exerciseId", "setsPlanned", "repsPerSet", "restTimeBetweenSets", "orderInDay")
                         VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (
-                        training_day_id,
-                        exercise_data.get("exerciseId"),
-                        exercise_data.get("setsPlanned", 3),
-                        exercise_data.get("repsPerSet", 10),
-                        exercise_data.get("restTimeBetweenSets", 60),
-                        0  # orderInDay - could be enhanced
-                    ))
+                        """,
+                        (
+                            training_day_id,
+                            exercise_data.get("exerciseId"),
+                            exercise_data.get("setsPlanned", 3),
+                            exercise_data.get("repsPerSet", 10),
+                            exercise_data.get("restTimeBetweenSets", 60),
+                            0,
+                        ),
+                    )
 
-                # Move to next training day
                 current_date += timedelta(days=1)
 
-            conn.commit()
-            logger.info(f"✅ Successfully created training program with {len(training_days)} days")
+            logger.info(
+                "✅ Successfully created training program with %d days", len(training_days)
+            )
 
             return {
                 "success": True,
                 "message": "Programme créé avec succès",
-                "programId": program_id
+                "programId": program_id,
             }
+
+        return run_transaction(_create)
 
     except Exception as e:
         logger.error(f"Error creating user training program: {e}", exc_info=True)

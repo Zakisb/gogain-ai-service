@@ -1,0 +1,137 @@
+model Organization {
+  id                Int      @id @default(autoincrement())
+  name              String
+  email             String?
+  deleted           Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  mainOrg           Boolean  @default(false)
+  numberOfEmployees Int      @default(0)
+  industryId        Int?     @default(1)
+  domain            String?
+  industry             Industry?           @relation(fields: [industryId], references: [id])
+  users                User[]
+  statusId             Int?
+  status               OrganizationStatus? @relation(fields: [statusId], references: [id])
+  representativeId     Int?
+  representative       User?               @relation("Representative", fields: [representativeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  logoId               Int?
+  logoImage            Image?              @relation(fields: [logoId], references: [id])
+  organizationInviteId Int?                @unique
+  organizationInvite   OrganizationInvite? @relation(fields: [organizationInviteId], references: [id])
+  representativeEmail  String?
+  clubs                Club[] // Add this line for clubs relation
+  subscriptions        Subscription[]
+  paymentMethods        PaymentMethod[]
+  
+  @@index([logoId])
+  @@index([representativeId])
+  @@index([statusId])
+  @@index([industryId])
+}
+
+model OrganizationStatus {
+  id            Int            @id @default(autoincrement())
+  code          String         @unique
+  displayName   String         @unique
+  description   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  organizations Organization[]
+}
+
+model OrganizationInvite {
+  id           Int                    @id @default(autoincrement())
+  organization Organization? // Add this line to complete the relation
+  inviteType   OrganizationInviteType @default(INBOUND)
+
+  // contact info
+  contactEmail     String
+  contactFirstName String?
+  contactLastName  String?
+  contactRoleId    Int?
+  contactRole      Role?   @relation("ContactRole", fields: [contactRoleId], references: [id])
+
+  organizationName String
+
+  employeeCount       Int
+  phoneNumber         String?
+  note                String?
+  statusId            Int?                      @default(1)
+  roleId              Int?
+  token               String?                   @unique
+  expiresAt           DateTime?
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+  industryId          Int?
+  industry            Industry?                 @relation(fields: [industryId], references: [id])
+  status              OrganizationInviteStatus? @relation(fields: [statusId], references: [id])
+  invitedBy           Int?
+  inviter             User?                     @relation("SentInvites", fields: [invitedBy], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  // Contact Attempt
+  contactAttemptDate  DateTime?
+  contactAttemptNotes String?
+  contactStatusId     Int?
+  contactStatus       ContactStatus?            @relation(fields: [contactStatusId], references: [id])
+  callbackDate        DateTime? // Add this field for scheduled callbacks
+
+  // Representative
+
+  representativeRoleId Int?
+  representativeRole   Role?   @relation("RepresentativeRole", fields: [representativeRoleId], references: [id])
+  representativeEmail  String?
+
+  // Final Notes
+  finalNotes      String?
+  reviewDate      DateTime?
+  // Approval/Rejection
+  rejectionReason String?
+  rejectionDate   DateTime?
+
+  approvalDate DateTime?
+
+  @@index([contactStatusId])
+  @@index([invitedBy])
+  @@index([industryId])
+  @@index([statusId])
+  @@index([roleId])
+  @@index([contactRoleId])
+  @@index([representativeRoleId])
+}
+
+model Industry {
+  id            Int                  @id @default(autoincrement())
+  code          String               @unique
+  displayName   String               @unique
+  description   String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  //   organizations Organization[]
+  invites       OrganizationInvite[]
+  organizations Organization[]
+}
+
+model OrganizationInviteStatus {
+  id          Int                  @id @default(autoincrement())
+  code        String               @unique
+  displayName String               @unique
+  description String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  step        Int?                 @default(1)
+  isTerminal  Boolean              @default(false)
+  invites     OrganizationInvite[]
+}
+
+model ContactStatus {
+  id                   Int                  @id @default(autoincrement())
+  code                 String               @unique
+  displayName          String               @unique
+  description          String?
+  requiresCallbackDate Boolean              @default(false) // Add this to indicate which statuses need a date
+  invites              OrganizationInvite[]
+}
+
+enum OrganizationInviteType {
+  INBOUND
+  OUTBOUND
+}

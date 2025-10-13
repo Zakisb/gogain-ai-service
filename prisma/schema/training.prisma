@@ -1,0 +1,299 @@
+model TrainingProgramTemplate {
+  id           Int                   @id @default(autoincrement())
+  name         String
+  description  String
+  duration     Int
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+  frequency    Int
+  createdBy    Int?
+  focusId      Int?
+  creator      User?                 @relation("ProgramCreator", fields: [createdBy], references: [id])
+  trainingDays TrainingDayTemplate[]
+  focus        TrainingProgramFocus? @relation(fields: [focusId], references: [id])
+  userPrograms UserTrainingProgram[]
+
+  @@index([createdBy])
+  @@index([focusId])
+}
+
+model TrainingProgramFocus {
+  id           Int                       @id @default(autoincrement())
+  name         String
+  description  String
+  createdAt    DateTime                  @default(now())
+  programs     TrainingProgramTemplate[]
+  userPrograms UserTrainingProgram[]
+}
+
+model TrainingDayTemplate {
+  id                Int                           @id @default(autoincrement())
+  trainingProgramId Int
+  dayNumber         Int
+  name              String
+  trainingProgram   TrainingProgramTemplate       @relation(fields: [trainingProgramId], references: [id])
+  exercises         TrainingDayExerciseTemplate[]
+
+  @@index([trainingProgramId])
+}
+
+model TrainingDayExerciseTemplate {
+  id                  Int                 @id @default(autoincrement())
+  trainingDayId       Int
+  exerciseId          Int
+  orderInDay          Int
+  setsPlanned         Int
+  repsPerSet          Int
+  restTimeBetweenSets Int
+  trainingDay         TrainingDayTemplate @relation(fields: [trainingDayId], references: [id])
+  exercise            Exercise            @relation(fields: [exerciseId], references: [id])
+
+  @@index([trainingDayId])
+  @@index([exerciseId])
+}
+
+model UserTrainingProgram {
+  id                        Int                      @id @default(autoincrement())
+  userId                    Int
+  name                      String
+  description               String
+  duration                  Int
+  frequency                 Int
+  startDate                 DateTime
+  endDate                   DateTime
+  createdAt                 DateTime                 @default(now())
+  focusId                   Int?
+  trainingProgramTemplateId Int?
+  status                    TrainingProgramStatus    @default(ACTIVE)
+  user                      User                     @relation(fields: [userId], references: [id])
+  trainingDays              UserTrainingDay[]
+  focus                     TrainingProgramFocus?    @relation(fields: [focusId], references: [id])
+  trainingProgramTemplate   TrainingProgramTemplate? @relation(fields: [trainingProgramTemplateId], references: [id])
+  level                     TrainingProgramLevel?    
+  @@index([trainingProgramTemplateId])
+  @@index([userId])
+  @@index([focusId])
+}
+
+model UserTrainingDay {
+  id                 Int                   @id @default(autoincrement())
+  userProgramId      Int
+  dayNumber          Int
+  name               String
+  date               DateTime
+  status             TrainingStatus        @default(PLANNED)
+  completedAt        DateTime?
+  notes              String?
+  durationInSeconds  Int?
+  exercisesCompleted Int?
+  exercisesPlanned   Int?
+  type               DayType               @default(TRAINING)
+  userProgram        UserTrainingProgram   @relation(fields: [userProgramId], references: [id])
+  workoutLog         WorkoutLog?
+  exercises          UserProgramExercise[]
+  activity           UserActivity?
+
+  @@index([userProgramId])
+}
+
+model UserProgramExercise {
+  id                  Int             @id @default(autoincrement())
+  userTrainingDayId   Int
+  exerciseId          Int
+  orderInDay          Int
+  setsPlanned         Int
+  repsPerSet          Int
+  restTimeBetweenSets Int
+  userTrainingDay     UserTrainingDay @relation(fields: [userTrainingDayId], references: [id])
+  exercise            Exercise        @relation(fields: [exerciseId], references: [id])
+
+  @@index([userTrainingDayId])
+  @@index([exerciseId])
+}
+
+model UserDailyHealthMetric {
+  id                   Int                 @id @default(autoincrement())
+  userId               Int
+  date                 DateTime
+  measurementTypeId    Int
+  value                Float // e.g., 5000 steps or 3.4 km
+  // Add provider information
+  healthDataProviderId Int?
+  healthDataProvider   HealthDataProvider? @relation(fields: [healthDataProviderId], references: [id])
+  sourceIdentifier     String? // Unique ID from the provider if available
+  dataOrigin           String? // e.g., "HealthKit", "Google Fit", "In App"
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id])
+  measurementType      MeasurementType     @relation(fields: [measurementTypeId], references: [id])
+
+  // Remove platform as it's now in HealthDataProvider
+  // platform        Platform?         // Remove this
+  // Optional: Add unique constraint if provider gives unique IDs for daily metrics
+  // @@unique([providerId, sourceIdentifier, date])  
+
+  @@index([userId])
+  @@index([date])
+  @@index([measurementTypeId])
+  @@index([healthDataProviderId])
+}
+
+// Activity tracking models
+model UserActivity {
+  id                Int                       @id @default(autoincrement())
+  userId            Int
+  startTime         DateTime
+  endTime           DateTime
+  isDeleted         Boolean                   @default(false)
+  isWorkout         Boolean                   @default(false)
+  recordingMethodId Int
+  recordingMethod   HealthDataRecordingMethod @relation(fields: [recordingMethodId], references: [id])
+
+  // Activity type and training day relations
+  activityTypeId    Int
+  userTrainingDayId Int?             @unique
+  activityType      ActivityType     @relation(fields: [activityTypeId], references: [id])
+  userTrainingDay   UserTrainingDay? @relation(fields: [userTrainingDayId], references: [id])
+
+  // Device information
+  deviceModel String? // e.g., "iPhone 15 Pro", "Pixel 7"
+  deviceType  DeviceType? // PHONE, WATCH, etc.
+
+  // Health Data Provider information
+  healthDataProviderId Int?
+  healthDataProvider   HealthDataProvider?   @relation(fields: [healthDataProviderId], references: [id])
+  sourceIdentifier     String? // Unique ID for this activity from the provider
+  dataOrigin           String?
+  // Relations
+  user                 User                  @relation(fields: [userId], references: [id])
+  measurements         ActivityMeasurement[]
+
+  @@unique([userId, healthDataProviderId, sourceIdentifier])
+  // Indexes
+  @@index([userId])
+  @@index([activityTypeId])
+  @@index([userTrainingDayId])
+  @@index([healthDataProviderId])
+  @@index([recordingMethodId])
+}
+
+model ActivityType {
+  id           Int     @id @default(autoincrement())
+  name         String  @unique
+  displayName  String
+  isWorkout    Boolean @default(false)
+  baseActivity String?
+  source       String? @default("smartwatch")
+
+  // Relations
+  activities   UserActivity[]
+  measurements ActivityTypeMeasurement[]
+}
+
+model ActivityMeasurement {
+  id                Int    @id @default(autoincrement())
+  activityId        Int
+  measurementTypeId Int
+  value             Float?
+
+  // Relations
+  activity        UserActivity    @relation(fields: [activityId], references: [id])
+  measurementType MeasurementType @relation(fields: [measurementTypeId], references: [id])
+
+  // Indexes
+  @@index([activityId])
+  @@index([measurementTypeId])
+}
+
+model ActivityTypeMeasurement {
+  id                Int     @id @default(autoincrement())
+  activityTypeId    Int
+  measurementTypeId Int
+  isPrimary         Boolean @default(false)
+
+  // Relations
+  activityType    ActivityType    @relation(fields: [activityTypeId], references: [id])
+  measurementType MeasurementType @relation(fields: [measurementTypeId], references: [id])
+
+  // Constraints and indexes
+  @@unique([activityTypeId, measurementTypeId])
+  @@index([activityTypeId])
+  @@index([measurementTypeId])
+}
+
+model MeasurementType {
+  id          Int    @id @default(autoincrement())
+  name        String @unique
+  unit        String
+  displayName String
+
+  // Relations
+  measurements             ActivityMeasurement[]
+  activityTypeMeasurements ActivityTypeMeasurement[]
+  userDailyHealthMetrics   UserDailyHealthMetric[]
+}
+
+model WorkoutLog {
+  id                Int             @id @default(autoincrement())
+  startTime         DateTime
+  endTime           DateTime
+  notes             String?
+  userTrainingDayId Int             @unique
+  userTrainingDay   UserTrainingDay @relation(fields: [userTrainingDayId], references: [id])
+  exerciseLogs      ExerciseLog[]
+}
+
+model ExerciseLog {
+  id           Int        @id @default(autoincrement())
+  workoutLogId Int
+  actualSets   Int
+  exerciseId   Int
+  workoutLog   WorkoutLog @relation(fields: [workoutLogId], references: [id])
+  exercise     Exercise   @relation(fields: [exerciseId], references: [id])
+  setLogs      SetLog[]
+
+  @@index([workoutLogId])
+  @@index([exerciseId])
+}
+
+model SetLog {
+  id            Int         @id @default(autoincrement())
+  exerciseLogId Int
+  setNumber     Int
+  actualReps    Int
+  weight        Float
+  restTimeAfter Int?
+  exerciseLog   ExerciseLog @relation(fields: [exerciseLogId], references: [id])
+
+  @@index([exerciseLogId])
+}
+
+enum TrainingProgramStatus {
+  ACTIVE
+  INACTIVE
+  COMPLETED
+}
+
+enum TrainingStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+enum DayType {
+  TRAINING
+  REST
+}
+
+enum DeviceType {
+  PHONE
+  WATCH
+  TABLET
+  UNKNOWN
+}
+
+enum TrainingProgramLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}

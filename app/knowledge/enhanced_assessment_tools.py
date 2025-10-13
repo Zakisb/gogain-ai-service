@@ -5,6 +5,7 @@ import logging
 import json
 import re
 import os
+import atexit
 import concurrent.futures
 import threading
 import contextvars
@@ -123,6 +124,18 @@ _QUERY_QUEUE_MAX_LENGTH = int(os.getenv("PAIN_RAG_QUERY_MAX_LENGTH", "50"))
 _QUESTIONS_QUEUE_TTL_SECONDS = int(os.getenv("PAIN_QUESTIONS_QUEUE_TTL_SECONDS", "1800"))  # 30 minutes
 _QUESTIONS_QUEUE_MAX_LENGTH = int(os.getenv("PAIN_QUESTIONS_QUEUE_MAX_LENGTH", "10"))  # Max 10 questions in queue
 
+_RAG_MAX_WORKERS = max(1, int(os.getenv("PAIN_RAG_MAX_WORKERS", "4")))
+_RAG_THREAD_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=_RAG_MAX_WORKERS)
+
+
+def _shutdown_rag_executor():
+    try:
+        _RAG_THREAD_POOL.shutdown(wait=False)
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_rag_executor)
 
 def _sanitize_for_key(value: str) -> str:
     """Sanitize identifiers for safe Redis key usage."""
@@ -605,34 +618,35 @@ class EnhancedRAGAssessmentRetriever:
         print(f"⚡ PARALLEL RAG: Executing {len(queries)} queries in parallel")
 
         all_results = []
+        if not queries:
+            return all_results
 
-        # Use ThreadPoolExecutor to run queries concurrently
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            # Submit all query tasks
-            future_to_query = {}
-            for query_info in queries:
-                future = executor.submit(
-                    self._retrieve_with_query,
-                    query_info["query"],
-                    body_region,
-                    query_info["priority"],
-                    top_k // len(queries) + 1,
-                    query_info.get("search_for_questions", False),
-                    user_symptoms,
-                    conversation_context
-                )
-                future_to_query[future] = query_info
+        # Use shared ThreadPoolExecutor to run queries concurrently
+        executor = _RAG_THREAD_POOL
+        future_to_query = {}
+        for query_info in queries:
+            future = executor.submit(
+                self._retrieve_with_query,
+                query_info["query"],
+                body_region,
+                query_info["priority"],
+                top_k // len(queries) + 1,
+                query_info.get("search_for_questions", False),
+                user_symptoms,
+                conversation_context
+            )
+            future_to_query[future] = query_info
 
-            # Collect results as they complete
-            for future in concurrent.futures.as_completed(future_to_query):
-                query_info = future_to_query[future]
-                try:
-                    results = future.result()
-                    all_results.extend(results)
-                    print(f"⚡ PARALLEL RAG: Completed query '{query_info['query'][:50]}...' with {len(results)} results")
-                except Exception as e:
-                    logger.error(f"Error in parallel query execution: {e}")
-                    continue
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_query):
+            query_info = future_to_query[future]
+            try:
+                results = future.result()
+                all_results.extend(results)
+                print(f"⚡ PARALLEL RAG: Completed query '{query_info['query'][:50]}...' with {len(results)} results")
+            except Exception as e:
+                logger.error(f"Error in parallel query execution: {e}")
+                continue
 
         print(f"⚡ PARALLEL RAG: Completed all {len(queries)} queries, total results: {len(all_results)}")
         return all_results
@@ -1461,31 +1475,31 @@ def create_llm_driven_rag_tool() -> FunctionTool:
                     logger.warning("⚠️ No retrieval inputs available; background RAG skipped.")
                     return
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                    future_to_query = {}
-                    for query in retrieval_inputs[:5]:
-                        future = executor.submit(
-                            retriever._retrieve_with_query,
-                            query,
-                            body_region,
-                            ClinicalPriority.HIGH,
-                            top_k=3,
-                            search_for_questions=True,
-                            user_symptoms=conversation_history[:500],
-                            conversation_context=conversation_history[:200],
-                        )
-                        future_to_query[future] = query
+                executor = _RAG_THREAD_POOL
+                future_to_query = {}
+                for query in retrieval_inputs[:5]:
+                    future = executor.submit(
+                        retriever._retrieve_with_query,
+                        query,
+                        body_region,
+                        ClinicalPriority.HIGH,
+                        top_k=3,
+                        search_for_questions=True,
+                        user_symptoms=conversation_history[:500],
+                        conversation_context=conversation_history[:200],
+                    )
+                    future_to_query[future] = query
 
-                    for future in concurrent.futures.as_completed(future_to_query):
-                        query = future_to_query[future]
-                        try:
-                            results = future.result()
-                            all_results.extend(results)
-                            print(
-                                f"⚡ LLM-RAG (background): Query '{query[:50]}...' returned {len(results)} results"
-                            )
-                        except Exception as exc:  # pragma: no cover - logging path
-                            logger.error(f"❌ Error executing agent-supplied query: {exc}")
+                for future in concurrent.futures.as_completed(future_to_query):
+                    query = future_to_query[future]
+                    try:
+                        results = future.result()
+                        all_results.extend(results)
+                        print(
+                            f"⚡ LLM-RAG (background): Query '{query[:50]}...' returned {len(results)} results"
+                        )
+                    except Exception as exc:  # pragma: no cover - logging path
+                        logger.error(f"❌ Error executing agent-supplied query: {exc}")
 
                 if not all_results:
                     logger.info(

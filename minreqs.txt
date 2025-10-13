@@ -47,7 +47,10 @@ llama-index-question-gen-openai==0.3.1
 
 # Database (for SQLAlchemy usage in examples)
 sqlalchemy==2.0.43
-psycopg2-binary==2.9.10
+#psycopg2-binary==2.9.10
+#prisma==0.12.0
+prisma==0.15.0
+
 
 # Standard Library Enhancements
 requests==2.32.5
