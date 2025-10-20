@@ -37,6 +37,10 @@ THREAD_MANAGER_PROVIDER = os.getenv("THREAD_MANAGER_PROVIDER", "auto")
 # You could add other settings here like embedding models, database URIs, etc.
 # EMBEDDING_MODEL = "text-embedding-ada-002"
 
+# --- Mem0 Configuration ---
+# Enable/disable message-based memory retrieval on every user message
+ENABLE_MEM0_MESSAGE_RETRIEVAL = os.getenv("ENABLE_MEM0_MESSAGE_RETRIEVAL", "true").lower() == "true"
+
 # --- Basic validation ---
 if not OPENAI_API_KEY and not ANTHROPIC_API_KEY: # Check if at least one key is present
      print("Warning: No primary API keys (e.g., OPENAI_API_KEY, ANTHROPIC_API_KEY) found in environment variables.")

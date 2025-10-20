@@ -67,3 +67,12 @@ def get_sync_redis() -> "redis.Redis":
         )
     url = _build_redis_url()
     return redis_sync.from_url(url, encoding="utf-8", decode_responses=True)
+
+
+def get_redis_url() -> str:
+    """Get Redis URL for LangChain integrations.
+
+    Returns:
+        Redis connection URL string
+    """
+    return _build_redis_url()

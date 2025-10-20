@@ -6,8 +6,18 @@ PainAssessmentAgent to gather injury data and uses AI-powered exercise selection
 to create customized training programs.
 """
 
-from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.core.base.llms.base import BaseLLM
+import logging
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from app.core.langchain_compat import ChatOpenAI
+from langchain_core.messages import BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+from app.agents.langchain_utils import (
+    convert_dict_messages_to_langchain,
+)
+from app.core.config import DEFAULT_MODEL
 
 _DESCRIPTION = (
     "Creates and updates personalised exercise programs. Incorporates user goals, "
@@ -26,13 +36,13 @@ Quand tu poses une question à l'utilisateur, formate-la EXACTEMENT comme ceci:
 
 Quel est votre objectif principal ?
 ```json
-{"id": "ameliorer_condition", "label": "Améliorer ma condition physique"}
-{"id": "redessiner_silhouette", "label": "Redessiner ma silhouette"}
-{"id": "reduire_stress", "label": "Réduire le stress"}
-{"id": "perdre_poids", "label": "Perdre du poids"}
-{"id": "preparer_marathon", "label": "Préparer un marathon"}
-{"id": "developper_force", "label": "Développer la force maximale"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "ameliorer_condition", "label": "Améliorer ma condition physique"}}
+{{"id": "redessiner_silhouette", "label": "Redessiner ma silhouette"}}
+{{"id": "reduire_stress", "label": "Réduire le stress"}}
+{{"id": "perdre_poids", "label": "Perdre du poids"}}
+{{"id": "preparer_marathon", "label": "Préparer un marathon"}}
+{{"id": "developper_force", "label": "Développer la force maximale"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
 
 **RÈGLES CRITIQUES POUR LE FORMAT:**
@@ -52,16 +62,16 @@ Quel est votre objectif principal ?
 
 Quel est votre niveau de fitness ?
 ```json
-{"id": "beginner", "label": "Débutant"}
-{"id": "intermediate", "label": "Intermédiaire"}
-{"id": "advanced", "label": "Avancé"}
+{{"id": "beginner", "label": "Débutant"}}
+{{"id": "intermediate", "label": "Intermédiaire"}}
+{{"id": "advanced", "label": "Avancé"}}
 ```
 
 Combien de jours par semaine pouvez-vous vous entraîner ?
 ```json
-{"id": "3_jours", "label": "3 jours par semaine"}
-{"id": "4_jours", "label": "4 jours par semaine"}
-{"id": "5_jours", "label": "5 jours par semaine"}
+{{"id": "3_jours", "label": "3 jours par semaine"}}
+{{"id": "4_jours", "label": "4 jours par semaine"}}
+{{"id": "5_jours", "label": "5 jours par semaine"}}
 ```
 
 **RÈGLE IMPORTANTE: UNE SEULE QUESTION À LA FOIS**
@@ -97,13 +107,13 @@ Before creating a training program, you MUST conduct a fitness goal assessment t
 
    Quel est votre objectif principal ?
    ```json
-   {"id": "ameliorer_condition", "label": "Améliorer ma condition physique"}
-   {"id": "redessiner_silhouette", "label": "Redessiner ma silhouette"}
-   {"id": "reduire_stress", "label": "Réduire le stress"}
-   {"id": "perdre_poids", "label": "Perdre du poids"}
-   {"id": "preparer_marathon", "label": "Préparer un marathon"}
-   {"id": "developper_force", "label": "Développer la force maximale"}
-   {"id": "autre", "label": "Autre (précisez)"}
+   {{"id": "ameliorer_condition", "label": "Améliorer ma condition physique"}}
+   {{"id": "redessiner_silhouette", "label": "Redessiner ma silhouette"}}
+   {{"id": "reduire_stress", "label": "Réduire le stress"}}
+   {{"id": "perdre_poids", "label": "Perdre du poids"}}
+   {{"id": "preparer_marathon", "label": "Préparer un marathon"}}
+   {{"id": "developper_force", "label": "Développer la force maximale"}}
+   {{"id": "autre", "label": "Autre (précisez)"}}
    ```
 
    VÉRIFIE: As-tu bien affiché les 7 options ci-dessus ? Si non, recommence.
@@ -114,32 +124,32 @@ Before creating a training program, you MUST conduct a fitness goal assessment t
    - **Statut professionnel:**
      Quel est votre statut actuel ?
      ```json
-     {"id": "etudiant", "label": "Étudiant"}
-     {"id": "travailleur", "label": "Travailleur"}
-     {"id": "les_deux", "label": "Les deux"}
-     {"id": "autre", "label": "Autre (précisez)"}
+     {{"id": "etudiant", "label": "Étudiant"}}
+     {{"id": "travailleur", "label": "Travailleur"}}
+     {{"id": "les_deux", "label": "Les deux"}}
+     {{"id": "autre", "label": "Autre (précisez)"}}
      ```
 
    - **Disponibilités horaires:**
      Quand préférez-vous vous entraîner ?
      ```json
-     {"id": "matin", "label": "Le matin"}
-     {"id": "midi", "label": "Le midi"}
-     {"id": "soir", "label": "Le soir"}
-     {"id": "flexible", "label": "Flexible"}
-     {"id": "autre", "label": "Autre (précisez)"}
+     {{"id": "matin", "label": "Le matin"}}
+     {{"id": "midi", "label": "Le midi"}}
+     {{"id": "soir", "label": "Le soir"}}
+     {{"id": "flexible", "label": "Flexible"}}
+     {{"id": "autre", "label": "Autre (précisez)"}}
      ```
 
    - **Suivi progression:**
      Souhaitez-vous suivre vos progrès ?
      ```json
-     {"id": "poids", "label": "Poids"}
-     {"id": "mensurations", "label": "Mensurations (taille/poitrine/bras/cuisse)"}
-     {"id": "taux_graisse", "label": "Taux de graisse corporelle"}
-     {"id": "photos", "label": "Photos (avant/après)"}
-     {"id": "tout", "label": "Tout suivre"}
-     {"id": "non", "label": "Non merci"}
-     {"id": "autre", "label": "Autre (précisez)"}
+     {{"id": "poids", "label": "Poids"}}
+     {{"id": "mensurations", "label": "Mensurations (taille/poitrine/bras/cuisse)"}}
+     {{"id": "taux_graisse", "label": "Taux de graisse corporelle"}}
+     {{"id": "photos", "label": "Photos (avant/après)"}}
+     {{"id": "tout", "label": "Tout suivre"}}
+     {{"id": "non", "label": "Non merci"}}
+     {{"id": "autre", "label": "Autre (précisez)"}}
      ```
 
 3. **Goal-Specific Follow-Up Questions (ONE AT A TIME):**
@@ -157,12 +167,12 @@ Before creating a training program, you MUST conduct a fitness goal assessment t
    - Délai souhaité pour voir résultats
    - Zones prioritaires à travailler:
      ```json
-     {"id": "taille", "label": "Affiner ma taille"}
-     {"id": "ventre", "label": "Avoir un ventre plus plat"}
-     {"id": "jambes_fessiers", "label": "Raffermir jambes et fessiers"}
-     {"id": "buste_bras", "label": "Tonifier buste et bras"}
-     {"id": "ensemble", "label": "Améliorer l'ensemble"}
-     {"id": "autre", "label": "Autre (précisez)"}
+     {{"id": "taille", "label": "Affiner ma taille"}}
+     {{"id": "ventre", "label": "Avoir un ventre plus plat"}}
+     {{"id": "jambes_fessiers", "label": "Raffermir jambes et fessiers"}}
+     {{"id": "buste_bras", "label": "Tonifier buste et bras"}}
+     {{"id": "ensemble", "label": "Améliorer l'ensemble"}}
+     {{"id": "autre", "label": "Autre (précisez)"}}
      ```
 
    **For "Réduire le stress":**
@@ -242,12 +252,12 @@ Après que `create_training_program` retourne un succès, tu DOIS envoyer DEUX m
 
 2. **MESSAGE 2 - Lien JSON (SEUL sur sa ligne, AUCUN texte avant ou après):**
    ```json
-   {"type":"link","text":"Voir mon programme","href":"/my-program"}
+   {{"type":"link","text":"Voir mon programme","href":"/my-program"}}
    ```
 
 **FORMAT EXACT DU LIEN:**
 - Le JSON du lien doit être envoyé SEUL, sans aucun texte avant ou après
-- Format: ```json sur une ligne, puis l'objet JSON {"type":"link","text":"Voir mon programme","href":"/my-program"}, puis ```
+- Format: ```json sur une ligne, puis l'objet JSON {{"type":"link","text":"Voir mon programme","href":"/my-program"}}, puis ```
 - PAS de texte explicatif autour du JSON
 - PAS de phrase comme "Voici le lien" ou "Clique ici"
 - JUSTE le bloc JSON
@@ -257,7 +267,7 @@ Après que `create_training_program` retourne un succès, tu DOIS envoyer DEUX m
 Félicitations ! Ton programme d'entraînement personnalisé a été créé avec succès ! 🎉
 
 ```json
-{"type":"link","text":"Voir mon programme","href":"/my-program"}
+{{"type":"link","text":"Voir mon programme","href":"/my-program"}}
 ```
 
 **WHAT YOU DO:**
@@ -288,33 +298,312 @@ Félicitations ! Ton programme d'entraînement personnalisé a été créé avec
 **RAPPEL FINAL - FORMAT APRÈS CRÉATION DE PROGRAMME:**
 Après un succès de `create_training_program`, envoie TOUJOURS ces deux messages dans l'ordre:
 1. Texte de félicitations
-2. JSON link seul: ```json\n{"type":"link","text":"Voir mon programme","href":"/my-program"}\n```
+2. JSON link seul: ```json\n{{"type":"link","text":"Voir mon programme","href":"/my-program"}}\n```
 
 C'est OBLIGATOIRE. Ne saute JAMAIS cette étape.
 """
 
 
-def build(llm: BaseLLM) -> FunctionAgent:
-    import logging
-    logger = logging.getLogger(__name__)
+class TrainingAgent:
+    """LangChain implementation of the personal training specialist."""
 
-    # Import training tools
-    from app.tools.date_tool import get_date_tool
-    from app.tools.training_tools import get_all_training_tools
+    agent_name = "PersonalTrainingAgent"
 
-    # Combine all tools
-    tools = [get_date_tool()] + get_all_training_tools()
+    def __init__(
+        self,
+        llm: Optional[ChatOpenAI] = None,
+        *,
+        temperature: float = 0.4,
+    ) -> None:
+        self.logger = logging.getLogger(__name__)
 
-    logger.info("🏗️ Building PersonalTrainingAgent with %d tools", len(tools))
+        from app.tools.date_tool import get_date_tool
+        from app.tools.training_tools import get_all_training_tools
 
-    agent = FunctionAgent(
-        name="PersonalTrainingAgent",
-        description=_DESCRIPTION,
-        system_prompt=_SYSTEM_PROMPT,
-        llm=llm,
-        tools=tools,
-        verbose=True,
-    )
+        # All tools are now native LangChain StructuredTool instances
+        self.tools = [get_date_tool()] + get_all_training_tools()
 
-    logger.info("✅ PersonalTrainingAgent created successfully with training tools")
-    return agent 
+        self.llm = llm or ChatOpenAI(
+            model=DEFAULT_MODEL,
+            temperature=temperature,
+            streaming=True,
+        )
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", _SYSTEM_PROMPT),
+                ("system", "{context}"),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
+        )
+
+        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
+        self.executor = AgentExecutor(
+            agent=agent,
+            tools=self.tools,
+            verbose=True,
+            handle_parsing_errors=True,
+        )
+
+        self.logger.info(
+            "🏗️ %s initialised with %d tools", self.agent_name, len(self.tools)
+        )
+
+    @staticmethod
+    def _chunk_to_text(chunk: Any) -> str:
+        if chunk is None:
+            return ""
+
+        # Check if chunk has 'content' attribute (LangChain message chunks)
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if isinstance(content, str):
+                return content
+            # Handle list/array content
+            if isinstance(content, (list, tuple)):
+                pieces: List[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text_value = part.get("text")
+                        if text_value:
+                            pieces.append(text_value)
+                    else:
+                        text_value = getattr(part, "text", None)
+                        if text_value:
+                            pieces.append(text_value)
+                        elif isinstance(part, str):
+                            pieces.append(part)
+                return "".join(pieces)
+
+        # Fallback: check for 'text' attribute
+        if hasattr(chunk, "text"):
+            return str(chunk.text)
+
+        # Last resort: empty string (don't stringify the whole object)
+        return ""
+
+    def _prepare_prompt_inputs(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        system_parts: List[str] = []
+        conversation: List[Dict[str, Any]] = []
+
+        for message in context_messages:
+            if message.get("role") == "system":
+                system_parts.append(message.get("content", ""))
+            else:
+                conversation.append(message)
+
+        if (
+            conversation
+            and conversation[-1].get("role") == "user"
+            and conversation[-1].get("content") == user_input
+        ):
+            conversation = conversation[:-1]
+
+        chat_history: List[BaseMessage] = convert_dict_messages_to_langchain(conversation)
+        context_text = "\n\n".join(part for part in system_parts if part).strip()
+
+        # Escape braces in context to prevent LangChain from interpreting them as template variables
+        context_text = context_text.replace("{", "{{").replace("}", "}}")
+
+        return {
+            "chat_history": chat_history,
+            "context": context_text,
+        }
+
+    async def astream_response(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
+        inputs = {
+            "input": user_input,
+            **prompt_inputs,
+        }
+
+        buffer: List[str] = []
+        tool_output_buffer: List[str] = []
+        in_tool_execution = False
+        tool_was_called = False
+
+        async for event in self.executor.astream_events(inputs, version="v2"):
+            kind = event.get("event")
+            name = event.get("name", "")
+            data = event.get("data") or {}
+
+            if kind == "on_tool_start":
+                tool_name = name or data.get("name", "unknown_tool")
+                self.logger.info(f"🔧 Training agent tool called: {tool_name}")
+                in_tool_execution = True
+                tool_was_called = True
+                tool_output_buffer = []
+                yield {
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "content": None,
+                }
+                continue
+
+            if kind == "on_chat_model_stream" and in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    tool_output_buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_tool_end":
+                in_tool_execution = False
+                output = data.get("output")
+                tool_name = name or getattr(data.get("tool"), "name", None)
+                if output:
+                    if isinstance(output, str):
+                        tool_output_buffer.append(output)
+                    else:
+                        tool_output_buffer.append(str(output))
+                yield {
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "content": output,
+                }
+                if output:
+                    text_output = output if isinstance(output, str) else str(output)
+                    buffered = text_output.strip()
+                    if buffered:
+                        yield {"type": "text", "content": buffered}
+                        buffer.append(buffered)
+                continue
+
+            # Stream LLM tokens when not in tool execution
+            if kind == "on_chat_model_stream" and not in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            # Fallback for on_llm_stream (older LangChain versions)
+            if kind == "on_llm_stream" and not in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_llm_end" and not in_tool_execution:
+                message = data.get("output")
+                text = self._chunk_to_text(message)
+                if text and not buffer:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_agent_finish":
+                output_payload = data.get("output")
+                final_text = ""
+
+                if tool_was_called:
+                    final_text = "".join(tool_output_buffer).strip()
+
+                if not final_text:
+                    if isinstance(output_payload, dict):
+                        final_text = (
+                            output_payload.get("output")
+                            or output_payload.get("final_output")
+                            or ""
+                        )
+                    else:
+                        final_text = str(output_payload) if output_payload else ""
+
+                if not final_text and isinstance(data, dict):
+                    return_values = data.get("return_values", {})
+                    if isinstance(return_values, dict):
+                        final_text = (
+                            return_values.get("output")
+                            or return_values.get("final_output")
+                            or final_text
+                        )
+
+                if not final_text:
+                    final_text = "".join(buffer).strip()
+
+                if final_text and not buffer:
+                    buffer.append(final_text)
+                    yield {"type": "text", "content": final_text}
+
+                yield {
+                    "type": "final",
+                    "content": final_text,
+                    "intermediate_steps": data.get("intermediate_steps"),
+                }
+                return
+
+            # Only handle on_chain_end for the final AgentExecutor, not intermediate chains
+            if kind == "on_chain_end" and name == "AgentExecutor":
+                output_payload = data.get("output")
+                final_text = ""
+
+                if tool_was_called:
+                    final_text = "".join(tool_output_buffer).strip()
+
+                if not final_text:
+                    if isinstance(output_payload, dict):
+                        final_text = (
+                            output_payload.get("output")
+                            or output_payload.get("final_output")
+                            or ""
+                        )
+                    else:
+                        final_text = str(output_payload) if output_payload else ""
+
+                if not final_text:
+                    final_text = "".join(buffer).strip()
+
+                if final_text and not buffer:
+                    yield {"type": "text", "content": final_text}
+
+                self.logger.info(
+                    "🧾 Training agent final payload: %s",
+                    final_text[:200] if final_text else "<empty>",
+                )
+
+                yield {
+                    "type": "final",
+                    "content": final_text,
+                    "intermediate_steps": data.get("intermediate_steps"),
+                }
+                return
+
+    async def ainvoke(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
+        result = await self.executor.ainvoke(
+            {
+                "input": user_input,
+                **prompt_inputs,
+            }
+        )
+        if not isinstance(result, dict):
+            return {"output": str(result)}
+        return result
+
+
+def build(llm: Optional[Any] = None, **kwargs: Any) -> TrainingAgent:
+    """Compatibility factory returning the LangChain personal training agent."""
+    if llm is not None and not isinstance(llm, ChatOpenAI):
+        logging.getLogger(__name__).warning(
+            "Ignoring non-LangChain llm passed to training.build: %s", type(llm)
+        )
+        llm = None
+    return TrainingAgent(llm=llm, **kwargs)

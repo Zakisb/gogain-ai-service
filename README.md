@@ -112,7 +112,7 @@ The hierarchical embedding system will:
 
 ### Testing the API
 
-- run the coach.py file for testing, will route to any agent, contains all features rag/memory/agents
+- run the coach.py file for testing, will route to any agent, supports all features rag/memory/agents
 
 
 # Install dependencies
@@ -129,9 +129,9 @@ docker compose up
 gogain-ai-service-v1/
 ├── app/
 │   ├── agents/           # AI agent implementations
-│   │   ├── central.py    # Central router agent
+│   │   ├── qa.py    	  # General router agent
 │   │   ├── pain.py       # Pain assessment agent
-│   │   ├── training.py   # Training program agent
+│   │   ├── training.py   # Training program agent 
 │   │   └── ...
 │   ├── api/              # FastAPI route definitions
 │   ├── core/             # Core configuration and utilities
@@ -162,6 +162,9 @@ python test_voyage_config.py
 
 # Interactive chat testing
 python coach.py
+
+#fetches all memories of a specific user (takes user_id as argument)
+python scripts/get_user_memories.py 
 
 # Analyze Qdrant collections
 python3 analyze_qdrant.py

@@ -1,4 +1,4 @@
-"""Basic chat endpoint using AgentWorkflow with CentralRouterAgent and PainAgent."""
+"""LangChain-powered chat endpoint orchestrated by the general coach agent."""
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -7,15 +7,14 @@ import logging
 import time
 import asyncio
 import json
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union, Optional, Tuple
 
-from llama_index.core.settings import Settings
-from llama_index.llms.openai import OpenAI
-
-from app.agents.central import build_workflow
+from app.agents.qa import GeneralCoachAgent, RouterDecision
+from app.agents.pain import PainAssessmentAgent
+from app.agents.training import TrainingAgent
 from app.core.memory import get_mem0_client
-from app.core.config import DEFAULT_MODEL
-from app.tools.date_tool import current_datetime_context_line
+from app.core.session_manager import SessionManager
+from app.core.config import ENABLE_MEM0_MESSAGE_RETRIEVAL
 from app.core.cache import (
     get_conversation_history as cache_get_conversation_history,
     add_conversation_message as cache_add_conversation_message,
@@ -30,7 +29,6 @@ from app.core.cache import (
     cache_user_profile,
     get_cached_training_program,
     cache_user_training_program,
-    set_pain_session_body_region,
 )
 from app.core.database import get_user_profile, get_user_training_program_overview
 
@@ -39,18 +37,38 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Global agent cache (initialized at startup, reused for all users)
-# Agents are stateless - user context comes from messages array per-request
-_CACHED_AGENTS = {
-    "pain": None,
-    "training": None,
-    "qa": None,
-}
-_AGENT_CACHE_LOCK = asyncio.Lock()
+# Global LangChain agents (initialised lazily)
+_GENERAL_AGENT: Optional[GeneralCoachAgent] = None
+_PAIN_AGENT: Optional[PainAssessmentAgent] = None
+_TRAINING_AGENT: Optional[TrainingAgent] = None
+_AGENT_INIT_LOCK = asyncio.Lock()
+_LAST_AGENT_BY_USER: Dict[str, str] = {}
 
 
-# NOTE: Workflow is NOT cached because it has mutable instance state (_current_agent, _user_id, etc)
-# that would cause race conditions between concurrent users. Only agents are cached.
+async def get_agents() -> Tuple[GeneralCoachAgent, PainAssessmentAgent, TrainingAgent]:
+    """Lazily instantiate and return shared agent instances.
+
+    Ensures the three core agents (general, pain, training) are available for routing.
+    """
+    global _GENERAL_AGENT, _PAIN_AGENT, _TRAINING_AGENT
+    if _GENERAL_AGENT is None or _PAIN_AGENT is None or _TRAINING_AGENT is None:
+        async with _AGENT_INIT_LOCK:
+            # First initialize the specialist agents (without tools wrapping)
+            if _PAIN_AGENT is None:
+                logger.info("🧠 Initialising PainAssessmentAgent")
+                _PAIN_AGENT = PainAssessmentAgent()
+            if _TRAINING_AGENT is None:
+                logger.info("🧠 Initialising TrainingAgent")
+                _TRAINING_AGENT = TrainingAgent()
+
+            # Then initialize the QA agent (no specialist tools; routing handled server-side)
+            if _GENERAL_AGENT is None:
+                logger.info("🧠 Initialising GeneralCoachAgent")
+                _GENERAL_AGENT = GeneralCoachAgent()
+                logger.info("✅ GeneralCoachAgent initialized")
+
+    # mypy help: the tuple will not contain None here
+    return _GENERAL_AGENT, _PAIN_AGENT, _TRAINING_AGENT  # type: ignore
 
 # Create API Router
 router = APIRouter(prefix="/chat")
@@ -106,37 +124,8 @@ async def is_pain_agent_session_active(user_id: str) -> bool:
     return await cache_is_pain_agent_session_active(user_id)
 
 
-def extract_body_region_from_message(message: str) -> str:
-    """Extract body region from user message using simple semantic matching.
-
-    Returns the body region (e.g., 'dos', 'epaule', 'genou') or 'general' if not found.
-    """
-    message_lower = message.lower()
-
-    # Map common pain location phrases to body regions
-    region_mappings = {
-        'dos': ['dos', 'lombaire', 'colonne', 'vertebr', 'rachis'],
-        'epaule': ['epaule', 'épaule', 'shoulder'],
-        'genou': ['genou', 'rotule', 'knee'],
-        'cou': ['cou', 'cervical', 'nuque', 'neck'],
-        'hanche': ['hanche', 'hip'],
-        'cheville': ['cheville', 'ankle'],
-        'poignet': ['poignet', 'wrist'],
-        'coude': ['coude', 'elbow'],
-        'pied': ['pied', 'foot'],
-        'main': ['main', 'hand'],
-    }
-
-    # Check for matches
-    for region, keywords in region_mappings.items():
-        for keyword in keywords:
-            if keyword in message_lower:
-                logger.info(f"🔍 Extracted body_region='{region}' from message (keyword: '{keyword}')")
-                return region
-
-    # Default to 'general' if no specific region found
-    logger.info("🔍 No specific body_region found in message, defaulting to 'general'")
-    return 'general'
+# REMOVED: extract_body_region_from_message - keyword matching violates CLAUDE.md principle
+# The LLM now intelligently chooses body_region via tool parameters based on user's description
 
 
 async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -186,6 +175,13 @@ async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
     This function is called once at request start to avoid repeated database queries.
     Profile is cached in Redis for 1 hour by default.
     """
+    # Validate that user_id is numeric
+    try:
+        numeric_user_id = int(user_id)
+    except (ValueError, TypeError):
+        logger.error(f"👤 Invalid user_id format: '{user_id}' - must be a numeric ID, not an email")
+        return {}
+
     # Try cache first
     cached_profile = await get_cached_user_profile(user_id)
     if cached_profile:
@@ -194,7 +190,7 @@ async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
 
     # Cache miss - fetch from database
     try:
-        profile = await asyncio.to_thread(get_user_profile, int(user_id))
+        profile = await asyncio.to_thread(get_user_profile, numeric_user_id)
         if profile:
             logger.info(f"👤 Fetched profile from database for user {user_id}")
             # Cache for future requests
@@ -210,6 +206,13 @@ async def get_or_fetch_user_profile(user_id: str) -> Dict[str, Any]:
 
 async def get_or_fetch_user_training_program(user_id: str) -> Dict[str, Any]:
     """Retrieve user training program summary via cache or database."""
+    # Validate that user_id is numeric
+    try:
+        numeric_user_id = int(user_id)
+    except (ValueError, TypeError):
+        logger.error(f"🏋️ Invalid user_id format: '{user_id}' - must be a numeric ID, not an email")
+        return {"hasProgram": False}
+
     cached_program = await get_cached_training_program(user_id)
     if cached_program is not None:
         if "snapshot" not in cached_program:
@@ -220,7 +223,7 @@ async def get_or_fetch_user_training_program(user_id: str) -> Dict[str, Any]:
         return cached_program
 
     try:
-        program = await asyncio.to_thread(get_user_training_program_overview, int(user_id))
+        program = await asyncio.to_thread(get_user_training_program_overview, numeric_user_id)
         summary: Dict[str, Any] = {"hasProgram": False}
         if program:
             summary = {"hasProgram": True, "program": program}
@@ -234,7 +237,7 @@ async def get_or_fetch_user_training_program(user_id: str) -> Dict[str, Any]:
         return summary
     except Exception as e:
         logger.error(f"🏋️ Error fetching training program: {e}")
-        return {}
+        return {"hasProgram": False}
 
 
 def _format_user_profile_context(user_profile: Dict[str, Any]) -> Optional[str]:
@@ -247,9 +250,10 @@ def _format_user_profile_context(user_profile: Dict[str, Any]) -> Optional[str]:
     first_name = user_profile.get("firstName") or user_profile.get("firstname")
     last_name = user_profile.get("lastName") or user_profile.get("lastname")
     if first_name and last_name:
-        lines.append(f"User's name: {first_name} {last_name}")
+        lines.append(f"Nom complet: {first_name} {last_name}")
+        lines.append(f"Prénom: {first_name}")
     elif first_name:
-        lines.append(f"User's name: {first_name}")
+        lines.append(f"Prénom: {first_name}")
 
     email = user_profile.get("email")
     if email:
@@ -257,39 +261,51 @@ def _format_user_profile_context(user_profile: Dict[str, Any]) -> Optional[str]:
 
     birth_date = user_profile.get("birthDate") or user_profile.get("birthdate")
     if birth_date:
-        lines.append(f"Birth date: {birth_date}")
+        # Calculate age from birth date
+        from datetime import datetime
+        try:
+            if isinstance(birth_date, str):
+                birth_date_obj = datetime.fromisoformat(birth_date.replace('Z', '+00:00'))
+            else:
+                birth_date_obj = birth_date
+            today = datetime.now()
+            age = today.year - birth_date_obj.year - ((today.month, today.day) < (birth_date_obj.month, birth_date_obj.day))
+            lines.append(f"Âge: {age} ans")
+            lines.append(f"Date de naissance: {birth_date}")
+        except:
+            lines.append(f"Date de naissance: {birth_date}")
 
     gender = user_profile.get("gender")
     if gender:
-        lines.append(f"Gender: {gender}")
+        lines.append(f"Genre: {gender}")
 
     height = user_profile.get("height")
     height_unit = user_profile.get("heightUnit") or user_profile.get("heightunit")
     if height is not None:
         lines.append(
-            f"Height: {height}{f' {height_unit}' if height_unit else ''}".strip()
+            f"Taille: {height}{f' {height_unit}' if height_unit else ' cm'}".strip()
         )
 
     weight = user_profile.get("weight")
     weight_unit = user_profile.get("weightUnit") or user_profile.get("weightunit")
     if weight is not None:
         lines.append(
-            f"Weight: {weight}{f' {weight_unit}' if weight_unit else ''}".strip()
+            f"Poids: {weight}{f' {weight_unit}' if weight_unit else ' kg'}".strip()
         )
 
     goal = user_profile.get("goal")
     if goal:
-        lines.append(f"Primary goal: {goal}")
+        lines.append(f"Objectif principal: {goal}")
 
     fitness_level = user_profile.get("fitnessLevel") or user_profile.get("fitnesslevel")
     if fitness_level:
-        lines.append(f"Fitness level: {fitness_level}")
+        lines.append(f"Niveau de fitness: {fitness_level}")
 
     desired_freq = user_profile.get("desiredTrainingFrequency") or user_profile.get(
         "desiredtrainingfrequency"
     )
     if desired_freq:
-        lines.append(f"Desired training frequency: {desired_freq}")
+        lines.append(f"Fréquence d'entraînement souhaitée: {desired_freq}")
 
     equipments = user_profile.get("availableEquipments") or user_profile.get(
         "availableequipments"
@@ -299,12 +315,12 @@ def _format_user_profile_context(user_profile: Dict[str, Any]) -> Optional[str]:
             equipments_str = ", ".join(str(item) for item in equipments)
         else:
             equipments_str = str(equipments)
-        lines.append(f"Available equipment: {equipments_str}")
+        lines.append(f"Équipement disponible: {equipments_str}")
 
     if not lines:
         return None
 
-    return "User Profile:\n" + "\n".join(lines)
+    return "PROFIL UTILISATEUR (INFORMATIONS PERSONNELLES À UTILISER DIRECTEMENT):\n" + "\n".join(lines)
 
 
 def _format_training_program_context(summary: Dict[str, Any]) -> Optional[str]:
@@ -383,6 +399,7 @@ def build_message_array_context(
     limit=3,
     include_memories=True,
     training_snapshot=None,
+    message_based_memories=None,
 ):
     """Build universal message array context that works with all LLM providers."""
     messages = []
@@ -410,6 +427,24 @@ def build_message_array_context(
             messages.append({
                 "role": "system",
                 "content": system_context
+            })
+
+    # Add message-based contextual memories (if available)
+    if message_based_memories:
+        contextual_memory_lines = []
+        for memory in message_based_memories:
+            if isinstance(memory, dict):
+                mem_text = memory.get('memory') or memory.get('content') or memory.get('text', '')
+                if mem_text:
+                    contextual_memory_lines.append(f"- {mem_text}")
+            elif isinstance(memory, str):
+                contextual_memory_lines.append(f"- {memory}")
+
+        if contextual_memory_lines:
+            contextual_context = f"Relevant memories for current topic:\n" + "\n".join(contextual_memory_lines)
+            messages.append({
+                "role": "system",
+                "content": contextual_context
             })
 
     # Add training program snapshot (if available)
@@ -560,15 +595,20 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
     except Exception as e:
         logger.warning(f"⚠️ Failed to inject queue into context: {e}")
 
-    # Get isolated pain session history
-    pain_history = await get_pain_agent_session_history(user_id)
+    # Get isolated pain session history from LangChain memory (NOT old cache)
+    from app.core.langchain_memory import get_conversation_history
+    pain_langchain_history = get_conversation_history(user_id, session_type="pain")
+    pain_messages = pain_langchain_history.messages
 
-    # Add pain session messages (all of them, no limit - it's a fresh context)
-    for msg in pain_history:
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
+    # Convert LangChain messages to dict format
+    for lc_msg in pain_messages:
+        if hasattr(lc_msg, 'type'):
+            if lc_msg.type == 'human':
+                messages.append({"role": "user", "content": lc_msg.content})
+            elif lc_msg.type == 'ai':
+                messages.append({"role": "assistant", "content": lc_msg.content})
+            elif lc_msg.type == 'system':
+                messages.append({"role": "system", "content": lc_msg.content})
 
     # Add current user message
     messages.append({
@@ -576,74 +616,79 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
         "content": current_message
     })
 
-    logger.info(f"🔴 Built pain agent context with {len(pain_history)} session messages + current message")
+    logger.info(f"🔴 Built pain agent context with {len(pain_messages)} session messages + current message")
     return messages
 
 
-async def warmup_agents(llm):
-    """Build and cache essential agents at startup.
-
-    This eliminates the 20-second first-request delay by pre-building agents.
-    Workflow is NOT cached (has mutable state, must be per-request for multi-user safety).
-    """
-    async with _AGENT_CACHE_LOCK:
-        logger.info("🔥 Building essential agents for cache...")
-
-        # Import agent builders
-        from app.agents.pain import build as build_pain
-        from app.agents.training import build as build_training
-        from app.agents.qa import build as build_qa
-
-        # Build only the 3 essential agents
-        _CACHED_AGENTS["pain"] = build_pain(llm)
-        _CACHED_AGENTS["training"] = build_training(llm)
-        _CACHED_AGENTS["qa"] = build_qa(llm)
-
-        logger.info("✅ Cached 3 essential agents (Pain, Training, QA - multi-user safe)")
-
-
-def get_cached_or_build_agents(llm):
-    """Return cached agents if available, otherwise build them.
-
-    Returns list of agents in order: [Pain, Training, QA]
-    """
-    if all(_CACHED_AGENTS.values()):
-        logger.info("⚡ Using cached agents (fast path)")
-        return [
-            _CACHED_AGENTS["pain"],
-            _CACHED_AGENTS["training"],
-            _CACHED_AGENTS["qa"],
-        ]
-    else:
-        # Fallback: build if cache not ready (shouldn't happen after warmup)
-        logger.warning("⚠️ Agent cache not ready, building on-demand (slow path)")
-        from app.agents.pain import build as build_pain
-        from app.agents.training import build as build_training
-        from app.agents.qa import build as build_qa
-
-        return [
-            build_pain(llm),
-            build_training(llm),
-            build_qa(llm),
-        ]
-
-
-def get_or_build_workflow(llm):
-    """Build workflow instance per-request (uses cached agents).
-
-    Workflow has mutable state (_current_agent, _user_id, etc) so must be created
-    per-request to avoid race conditions between concurrent users.
-
-    Agents are cached globally (safe: they're stateless).
-    """
-    specialist_agents = get_cached_or_build_agents(llm)
-    workflow = build_workflow(
-        llm,
-        specialist_agents,
-        initial_state={}
+async def build_training_agent_context(
+    user_id: str,
+    current_message: str,
+    user_profile: Dict[str, Any],
+    user_memories: List[Any],
+    training_snapshot: Optional[str],
+) -> Tuple[List[Dict[str, Any]], List[Any]]:
+    """Build context payload for the training agent with isolated history."""
+    # Retrieve conversation history from LangChain memory
+    training_history = await SessionManager.get_conversation_for_agent(
+        user_id=user_id,
+        agent_type="training",
+        limit=None,
     )
-    logger.info("🏗️ Built workflow for request (using cached agents)")
-    return workflow
+
+    # Start with system context (profile, memories, snapshot)
+    context_messages = build_message_array_context(
+        history=[],
+        current_message=current_message,
+        user_profile=user_profile,
+        user_memories=user_memories,
+        include_memories=True,
+        training_snapshot=training_snapshot,
+        limit=10,
+    )
+
+    # Remove placeholder current message, will re-append after history
+    if context_messages:
+        context_messages = context_messages[:-1]
+
+    # Attach training-specific conversation history
+    for msg in training_history:
+        if hasattr(msg, "type"):
+            role = "user" if msg.type == "human" else "assistant" if msg.type == "ai" else "system"
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            context_messages.append({"role": role, "content": content})
+
+    # Finally, add current user message
+    context_messages.append({"role": "user", "content": current_message})
+
+    return context_messages, training_history
+
+
+def build_session_summary(
+    active_agent: str,
+    last_agent: Optional[str],
+    pain_metadata: Optional[Dict[str, Any]],
+    training_snapshot: Optional[str],
+) -> str:
+    """Create a concise session summary for router context."""
+    lines: List[str] = []
+    lines.append(f"Active agent: {active_agent}")
+    if pain_metadata:
+        body_region = pain_metadata.get("body_region")
+        if body_region:
+            lines.append(f"Pain session body region: {body_region}")
+    if last_agent:
+        lines.append(f"Dernier agent utilisé: {last_agent}")
+    else:
+        lines.append("Dernier agent utilisé: GeneralQAAgent")
+    if training_snapshot:
+        lines.append("TRAINING PROGRAM SNAPSHOT:")
+        lines.append(training_snapshot)
+    return "\n".join(lines)
+
+
+async def warmup_agents() -> None:
+    """Initialize the LangChain agents at startup."""
+    await get_agents()
 
 
 # ==========================
@@ -740,374 +785,474 @@ def unwrap_pain_agent_response(response_text: str) -> str:
 
 @legacy_router.post("/virtual-coach/chat")
 async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> StreamingResponse:
-    """Compatibility endpoint that mirrors the legacy Node /virtual-coach/chat contract.
-
-    - Accepts: { userId, message, conversationHistory }
-    - Streams: text_delta chunks, optional tool_result notifications, and a final message_stop
-      with the updated conversation (no system messages).
-    """
+    """Compatibility endpoint that mirrors the legacy Node /virtual-coach/chat contract."""
 
     async def stream_generator():
-        try:
-            req_start_ts = time.perf_counter()
-            user_id = str(request.userId)
-            user_message = request.message
-            history = request.conversationHistory or []
+        req_start_ts = time.perf_counter()
+        user_id = str(request.userId)
+        user_message = request.message
+        history = request.conversationHistory or []
+        prior_history = [
+            {"role": entry.get("role"), "content": entry.get("content")}
+            for entry in history
+            if entry.get("role") and entry.get("content") is not None
+        ]
 
+        try:
+            general_agent, pain_agent, training_agent = await get_agents()
             logger.info(f"[VC Compat] Starting chat for user {user_id}")
 
-            # 👤 FETCH USER PROFILE AT REQUEST START (cached in Redis for 1 hour)
-            # This avoids repeated database queries and provides user name for personalization
-            user_profile = await get_or_fetch_user_profile(user_id)
+            # Check for manual agent switches (user wants to cancel current specialist)
+            manual_switch_target = await SessionManager.should_switch_agent(user_id, user_message)
+            if manual_switch_target:
+                logger.info(f"🔄 Manual agent switch detected for user {user_id} -> {manual_switch_target}")
+                # Get current active agent
+                current_agent = await SessionManager.get_active_agent(user_id)
+                if current_agent in ("pain", "training"):
+                    # End the current specialist session
+                    await SessionManager.end_specialist_session(
+                        user_id=user_id,
+                        agent_type=current_agent,
+                        clear_history=True
+                    )
+                    logger.info(f"✅ Ended {current_agent} session, switched to general")
 
-            # 🧠 FETCH USER MEMORIES AT REQUEST START (cached in Redis for 10 minutes)
-            # This avoids repeated Mem0 API calls during conversation
-            # Memories will be injected only into GeneralQA agent context
-            user_memories = await get_or_fetch_user_memories(user_id, limit=20)
+            # Get current active agent for routing
+            active_agent_type = await SessionManager.get_active_agent(user_id)
+            logger.info(f"🎯 Active agent for user {user_id}: {active_agent_type}")
 
-            # 🏋️ FETCH USER TRAINING SNAPSHOT ONCE PER REQUEST (cached in Redis for 15 minutes)
-            training_program_summary = await get_or_fetch_user_training_program(user_id)
-            training_snapshot = training_program_summary.get("snapshot")
+            try:
+                user_profile = await get_or_fetch_user_profile(user_id)
+                user_memories = await get_or_fetch_user_memories(user_id, limit=20)
+                training_program_summary = await get_or_fetch_user_training_program(user_id)
+                training_snapshot = training_program_summary.get("snapshot")
 
-            # Initialize LLM
-            temp = 1.0 if DEFAULT_MODEL.startswith('gpt-5') else 0.6
-            # Cap tokens for QA-style explanatory turns to keep latency low
-            # We pass the same llm instance to all agents; QA responses are typically
-            # shorter, so a lower max_tokens helps prevent long completions.
-            llm = OpenAI(model=DEFAULT_MODEL, temperature=temp, max_tokens=600)
+                # Search Mem0 using current user message for contextual memory retrieval
+                # This block can be disabled by setting ENABLE_MEM0_MESSAGE_RETRIEVAL=false in .env
+                retrieval_start = time.perf_counter()
+                message_based_memories = []
+                if ENABLE_MEM0_MESSAGE_RETRIEVAL:
+                    try:
+                        mem0_client = get_mem0_client()
+                        if mem0_client:
+                            logger.info(f"🔍 [Mem0 Search] Searching with query: '{user_message[:100]}...'")
+                            result = await asyncio.to_thread(
+                                mem0_client.search_memories,
+                                query=user_message,
+                                user_id=user_id,
+                                limit=5,
+                            )
+                            retrieval_elapsed = time.perf_counter() - retrieval_start
 
-            # Set user_id in thread-local storage for tools to access programmatically
-            from app.knowledge.enhanced_assessment_tools import set_user_context
-            set_user_context(user_id)
+                            if result.get("success"):
+                                message_based_memories = result.get("memories", [])
+                                logger.info(
+                                    f"✅ [Mem0 Search] Retrieved {len(message_based_memories)} contextual memories in {retrieval_elapsed:.3f}s"
+                                )
+                            else:
+                                logger.warning(f"⚠️ [Mem0 Search] Failed: {result.get('error')}")
+                    except Exception as mem_exc:
+                        retrieval_elapsed = time.perf_counter() - retrieval_start
+                        logger.error(f"❌ [Mem0 Search] Error after {retrieval_elapsed:.3f}s: {mem_exc}")
+                else:
+                    logger.info("⊘ [Mem0 Search] Disabled via ENABLE_MEM0_MESSAGE_RETRIEVAL config")
 
-            # Build a fresh workflow per request
-            workflow = get_or_build_workflow(llm)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(f"[VC Compat] Context preload failed: {exc}", exc_info=True)
+                user_profile = {}
+                user_memories = []
+                training_program_summary = {}
+                training_snapshot = None
+                message_based_memories = []
 
-            # Build router/agent contexts from provided conversationHistory for better continuity
-            def to_history_pairs(conv: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-                out = []
-                for m in conv:
-                    role = m.get("role")
-                    content = m.get("content")
-                    if not role or content is None:
-                        continue
-                    out.append({"role": role, "content": content})
-                return out
+            # SMART ROUTING: determine which agent should handle this turn
+            handling_agent_type = active_agent_type
+            handling_agent_obj: Optional[Any] = None
+            handling_agent = ""
+            context_messages: List[Dict[str, Any]] = []
+            general_context: Optional[List[Dict[str, Any]]] = None
+            training_history: List[Any] = []
+            body_region = "general"
 
-            prior_history = to_history_pairs(history)
+            current_metadata: Dict[str, Any] = {}
+            if active_agent_type in ("pain", "training"):
+                current_metadata = await SessionManager.get_session_metadata(user_id)
 
-            # Build router context with sufficient history for workflow continuity
-            # Need to see enough turns to understand if user is in training/pain workflow
-            routing_messages = build_message_array_context(
-                history=prior_history[-8:] if len(prior_history) > 8 else prior_history,
-                current_message=user_message,
-                user_memories=[],
-                limit=10,  # Router needs last 8 turns to maintain workflow context (training program creation, pain assessment)
-                include_memories=False,
-                training_snapshot=training_snapshot,
-            )
-            routing_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
+            if active_agent_type == "general":
+                logger.info("🧭 Routing decision required (currently with General agent)")
+                general_context = build_message_array_context(
+                    history=prior_history,
+                    current_message=user_message,
+                    user_profile=user_profile,
+                    user_memories=user_memories,
+                    include_memories=True,
+                    training_snapshot=training_snapshot,
+                    message_based_memories=message_based_memories,
+                    limit=10,
+                )
 
-            # DUAL HISTORY SYSTEM: Check if pain agent session is active
-            # If yes, build agent context from ISOLATED pain session (fresh context)
-            # If no, build from full conversation history
-            # NOTE: We DON'T add the current message to the pain session yet - we wait until
-            # after workflow execution to confirm pain agent actually handled it
-            if await is_pain_agent_session_active(user_id):
-                logger.info(f"🔴 Pain session ACTIVE - building agent context from isolated session for {user_id}")
-                # Get body_region from pain session (set by RAG tool calls)
-                from app.core.cache import get_pain_session_body_region
-                body_region = await get_pain_session_body_region(user_id)
-                logger.info(f"🔍 Retrieved body_region '{body_region}' for pain session context")
+                session_summary = build_session_summary(
+                    active_agent=active_agent_type,
+                    last_agent=_LAST_AGENT_BY_USER.get(user_id),
+                    pain_metadata=current_metadata if current_metadata else {},
+                    training_snapshot=training_snapshot,
+                )
+                router_conversation = list(prior_history)
+                router_conversation.append({"role": "user", "content": user_message})
 
-                # Build context from pain session only (isolated, fresh context)
-                # The current user message will be added by build_pain_agent_context
-                agent_messages = await build_pain_agent_context(
+                try:
+                    decision = await general_agent.decide_route(
+                        router_conversation,
+                        user_message,
+                        session_summary=session_summary,
+                    )
+                    logger.info(
+                        "🧭 Router decision user=%s -> %s (confidence=%.2f): %s",
+                        user_id,
+                        decision.agent,
+                        decision.confidence,
+                        decision.reason,
+                    )
+                except Exception as routing_error:
+                    logger.error(
+                        f"❌ Router decision failed for user {user_id}: {routing_error}",
+                        exc_info=True,
+                    )
+                    decision = RouterDecision(
+                        agent="general",
+                        reason="Routing fallback due to error",
+                        confidence=0.0,
+                    )
+
+                if decision.agent == "pain":
+                    handling_agent_type = "pain"
+                    body_region = (decision.body_region or "general").strip()
+                    try:
+                        await SessionManager.start_specialist_session(
+                            user_id=user_id,
+                            agent_type="pain",
+                            metadata={"body_region": body_region},
+                        )
+                        logger.info(
+                            "🚀 Started pain session for user %s (region=%s)",
+                            user_id,
+                            body_region,
+                        )
+                        try:
+                            from app.knowledge.enhanced_assessment_tools import launch_mem0_retrieval
+
+                            launch_mem0_retrieval(user_id, body_region, user_message)
+                        except Exception as launch_error:
+                            logger.warning(f"⚠️ Failed to launch Mem0 retrieval: {launch_error}")
+                    except Exception as start_error:
+                        logger.error(f"❌ Failed to start pain session: {start_error}", exc_info=True)
+                        handling_agent_type = "general"
+                        general_context = general_context or []
+                        current_metadata = {}
+                    else:
+                        current_metadata = {"body_region": body_region}
+
+                elif decision.agent == "training":
+                    handling_agent_type = "training"
+                    try:
+                        await SessionManager.start_specialist_session(
+                            user_id=user_id,
+                            agent_type="training",
+                            metadata={},
+                        )
+                        logger.info("🚀 Started training session for user %s", user_id)
+                    except Exception as start_error:
+                        logger.error(f"❌ Failed to start training session: {start_error}", exc_info=True)
+                        handling_agent_type = "general"
+                        general_context = general_context or []
+                        current_metadata = {}
+                    else:
+                        current_metadata = {}
+                else:
+                    handling_agent_type = "general"
+                    current_metadata = {}
+
+            # Update active agent type based on routing decision
+            active_agent_type = handling_agent_type
+
+            if handling_agent_type == "pain":
+                handling_agent_obj = pain_agent
+                handling_agent = "PainAssessmentAgent"
+
+                if not current_metadata:
+                    current_metadata = await SessionManager.get_session_metadata(user_id)
+                body_region = current_metadata.get("body_region", body_region)
+
+                # Store user message BEFORE building context to include in memory
+                await SessionManager.store_message(
+                    user_id=user_id,
+                    message=user_message,
+                    role="user",
+                    agent_context="pain"
+                )
+
+                context_messages = await build_pain_agent_context(
                     user_id=user_id,
                     current_message=user_message,
                     body_region=body_region,
-                    user_memories=[],
+                    user_memories=user_memories,
                     include_memories=False,
-                    user_profile=user_profile,
+                    user_profile=user_profile
                 )
-            else:
-                logger.info(f"🟢 Pain session INACTIVE - building agent context from full history for {user_id}")
-                # Build context from full conversation history (normal flow)
-                # Inject user profile and memories here (GeneralQA agent will receive them)
-                agent_messages = build_message_array_context(
-                    history=prior_history,
+
+            elif handling_agent_type == "training":
+                handling_agent_obj = training_agent
+                handling_agent = "TrainingAgent"
+
+                # Store user message BEFORE building context
+                await SessionManager.store_message(
+                    user_id=user_id,
+                    message=user_message,
+                    role="user",
+                    agent_context="training"
+                )
+
+                context_messages, training_history = await build_training_agent_context(
+                    user_id=user_id,
                     current_message=user_message,
-                    user_profile=user_profile,  # Inject user profile for personalization
-                    user_memories=user_memories,  # Inject cached memories for QA agent
-                    limit=20,  # Reduced from 40 for faster processing
-                    include_memories=True,  # Enable memory injection for QA agent
+                    user_profile=user_profile,
+                    user_memories=user_memories,
                     training_snapshot=training_snapshot,
                 )
 
-            # No router guardrails; rely on agent prompts for handoff behavior
+                logger.info(
+                    "🏋️ Training agent context prepared: %d messages (%d from history)",
+                    len(context_messages),
+                    len(training_history),
+                )
+                for idx, msg in enumerate(context_messages[-5:]):
+                    logger.debug(f"  [{idx}] {msg.get('role')}: {msg.get('content', '')[:100]}")
 
-            agent_messages.insert(0, {"role": "system", "content": f"Current user_id: {user_id}"})
+            else:
+                handling_agent_obj = general_agent
+                handling_agent = "GeneralQAAgent"
+                if general_context is None:
+                    general_context = build_message_array_context(
+                        history=prior_history,
+                        current_message=user_message,
+                        user_profile=user_profile,
+                        user_memories=user_memories,
+                        include_memories=True,
+                        training_snapshot=training_snapshot,
+                        message_based_memories=message_based_memories,
+                        limit=10,
+                    )
+                context_messages = general_context
 
-            final_response_content = ""
-            collected_response = ""
+            # Set user context for tools (so they can access user_id programmatically)
+            from app.knowledge.enhanced_assessment_tools import set_user_context
+            set_user_context(user_id)
 
-            # Prefer streaming when available
-            if hasattr(workflow, 'run_with_streaming'):
-                first_token_ts: Optional[float] = None
-                token_chunks: int = 0
-                streamed: bool = False
-                def coerce_chunk_to_text(chunk) -> str:
-                    if chunk is None:
-                        return ""
-                    if isinstance(chunk, str):
-                        return chunk
-                    if isinstance(chunk, (list, tuple)):
-                        return "".join(coerce_chunk_to_text(item) for item in chunk)
-                    if isinstance(chunk, dict):
-                        if 'content' in chunk:
-                            return coerce_chunk_to_text(chunk['content'])
-                        if 'delta' in chunk:
-                            return coerce_chunk_to_text(chunk['delta'])
-                        if 'text' in chunk:
-                            return coerce_chunk_to_text(chunk['text'])
-                        return ""
-                    text_attr = getattr(chunk, 'text', None)
-                    if text_attr is not None:
-                        return coerce_chunk_to_text(text_attr)
-                    content_attr = getattr(chunk, 'content', None)
-                    if content_attr is not None:
-                        return coerce_chunk_to_text(content_attr)
-                    delta_attr = getattr(chunk, 'delta', None)
-                    if delta_attr is not None:
-                        return coerce_chunk_to_text(delta_attr)
-                    return str(chunk)
+            collected_response_parts: List[str] = []
+            final_payload: Optional[Dict[str, Any]] = None
+            just_emitted_backticks = False
+            token_chunks = 0
+            first_token_ts: Optional[float] = None
 
-                try:
-                    just_emitted_backticks = False  # track fence opening for UI protocol
-                    async for response_chunk in workflow.run_with_streaming(
-                        user_msg=user_message,
-                        router_context=routing_messages,
-                        agent_context=agent_messages,
-                        user_id=user_id,
-                        training_context=training_snapshot,
-                    ):
-                        # Handle structured events (e.g., tool_result) emitted by workflow
-                        if isinstance(response_chunk, dict) and response_chunk.get("event") == "tool_result":
-                            fn_name = response_chunk.get("function_name") or response_chunk.get("tool") or "unknown_tool"
-                            status = response_chunk.get("status", "ok")
-                            yield emit_vc_event("tool_result", {"function_name": fn_name, "status": status}) + "\n\n"
-                            await asyncio.sleep(0)
-                            continue
+            try:
+                logger.info(f"🚀 Starting astream_response for {handling_agent}")
+                event_count = 0
+                async for agent_event in handling_agent_obj.astream_response(
+                    context_messages,
+                    user_message,
+                ):
+                    event_count += 1
+                    event_type = agent_event.get("type")
+                    logger.debug(f"📦 Event #{event_count}: {event_type}")
 
-                        token = coerce_chunk_to_text(response_chunk)
-                        if not token:
-                            continue
-                        # Normalize like Node: strip assistant: prefixes
-                        t = token.replace("\r", "")
-                        if t.startswith("assistant: "):
-                            t = t[len("assistant: "):].lstrip()
-                        elif t.startswith("assistant:\n"):
-                            t = t[len("assistant:\n"):].lstrip()
-                        elif t.startswith("assistant:"):
-                            t = t[len("assistant:"):].lstrip()
-                        if not t:
-                            continue
-                        # Split to respect frontend's fenced JSON protocol
-                        pieces, just_emitted_backticks = _split_for_frontend_chunks(t, just_emitted_backticks)
+                    if event_type == "tool_result":
+                        tool_name = agent_event.get("tool_name") or "tool"
+                        tool_payload = {
+                            "function_name": tool_name,
+                            "status": "ok",
+                        }
+                        yield emit_vc_event("tool_result", tool_payload) + ""
+                        await asyncio.sleep(0)
+                        continue
+
+                    if event_type == "text":
+                        text = (agent_event.get("content") or "").replace("", "")
+                        pieces, just_emitted_backticks = _split_for_frontend_chunks(text, just_emitted_backticks)
                         for piece in pieces:
                             if not piece:
                                 continue
-                            # First-token timestamp
                             if first_token_ts is None:
                                 first_token_ts = time.perf_counter()
-                                streamed = True
-                            collected_response += piece
+                            collected_response_parts.append(piece)
                             token_chunks += 1
-                            yield emit_vc_event("text_delta", piece) + "\n\n"  # Extra padding for Docker flushing
-                            # Force immediate flush
+                            yield emit_vc_event("text_delta", piece) + ""
                             await asyncio.sleep(0)
-                except Exception as e:
-                    logger.warning(f"[VC Compat] Streaming failed, will fallback: {e}")
+                        continue
 
-            # If nothing streamed, or as completion
-            if not collected_response:
-                # Fallback to non-streaming
-                if hasattr(workflow, 'run'):
-                    result = await workflow.run(
-                        user_msg=user_message,
-                        router_context=routing_messages,
-                        agent_context=agent_messages,
-                        user_id=user_id,
-                        training_context=training_snapshot,
-                    )
-                elif hasattr(workflow, 'arun'):
-                    result = await workflow.arun(
-                        user_msg=user_message,
-                        router_context=routing_messages,
-                        agent_context=agent_messages,
-                        user_id=user_id,
-                        training_context=training_snapshot,
-                    )
-                else:
-                    result = ""
-                final_response_content = (
-                    str(getattr(result, 'response', result)).strip() if result is not None else ""
-                )
-            else:
-                final_response_content = collected_response
+                    if event_type == "final":
+                        final_payload = agent_event
+                        break
 
-            if final_response_content.startswith("assistant: "):
-                final_response_content = final_response_content[len("assistant: "):].strip()
-            elif final_response_content.startswith("assistant:\n"):
-                final_response_content = final_response_content[len("assistant:\n"):].strip()
-            elif final_response_content.startswith("assistant:"):
-                final_response_content = final_response_content[len("assistant:"):].strip()
+                logger.info(f"✅ Completed astream_response: {event_count} events processed")
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error(f"[VC Compat] Streaming failed, falling back: {exc}", exc_info=True)
+
+            final_response_content = ""
+            if final_payload and final_payload.get("content"):
+                final_response_content = str(final_payload["content"]).strip()
+            if not final_response_content:
+                final_response_content = "".join(collected_response_parts).strip()
+
+            # FALLBACK: If streaming failed (no response), try non-streaming ainvoke
+            if not final_response_content and handling_agent in ("TrainingAgent", "PainAssessmentAgent"):
+                logger.warning(f"⚠️ Streaming failed for {handling_agent}, falling back to ainvoke")
+                try:
+                    result = await handling_agent_obj.ainvoke(context_messages, user_message)
+                    final_response_content = result.get("output") or result.get("final_output") or str(result)
+                    logger.info(f"✅ Fallback ainvoke succeeded: {len(final_response_content)} chars")
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback ainvoke also failed: {fallback_error}", exc_info=True)
 
             if not final_response_content:
-                final_response_content = "I'm sorry, I couldn't generate a response. Please try again."
+                final_response_content = "Je suis désolé, je n'ai pas pu générer de réponse. Peux-tu reformuler ?"
 
-            # DUAL HISTORY SYSTEM: Check which agent handled the request
-            handling_agent = workflow.get_current_agent() if hasattr(workflow, 'get_current_agent') else None
-            logger.info(f"🎯 Request handled by agent: {handling_agent}")
-
-            # --- Lightweight per-turn timing logs ---
             total_elapsed = time.perf_counter() - req_start_ts
-            if 'first_token_ts' in locals() and first_token_ts is not None:
+            if first_token_ts is not None:
                 ttfb = first_token_ts - req_start_ts
                 logger.info(
                     "⏱️ Turn timings | user=%s agent=%s streamed=%s ttfb=%.2fs total=%.2fs chunks=%d",
-                    user_id, handling_agent, bool(streamed), ttfb, total_elapsed, token_chunks,
+                    user_id,
+                    handling_agent,
+                    bool(collected_response_parts),
+                    ttfb,
+                    total_elapsed,
+                    token_chunks,
                 )
             else:
                 logger.info(
                     "⏱️ Turn timings | user=%s agent=%s streamed=%s total=%.2fs",
-                    user_id, handling_agent, False, total_elapsed,
+                    user_id,
+                    handling_agent,
+                    False,
+                    total_elapsed,
                 )
 
-            # Unwrap pain agent structured JSON responses if needed
-            if handling_agent == "EnhancedPainAssessmentAgent":
-                final_response_content = unwrap_pain_agent_response(final_response_content)
-                if final_response_content:
-                    if "```json" in final_response_content:
-                        logger.info(
-                            "🗣️ Pain agent question payload:\n%s",
-                            final_response_content,
+            # Store messages using SessionManager (handles both general and specialist contexts)
+            # BUT: Don't store if already stored (direct routing stored user message early, tools store everything)
+            try:
+                # Check if we need to store messages
+                # - Direct routing (pain/training): Only store ASSISTANT message (user already stored early)
+                # - General agent WITHOUT tools: Store BOTH messages
+                if handling_agent in ("PainAssessmentAgent", "TrainingAgent"):
+                    # Direct routing: User message was stored BEFORE calling agent
+                    # Only store assistant response here
+                    await SessionManager.store_message(
+                        user_id=user_id,
+                        message=final_response_content,
+                        role="assistant",
+                        agent_context=active_agent_type
+                    )
+                    logger.debug(f"📝 Stored assistant response for {handling_agent} (user message stored early)")
+
+                else:
+                    # General agent: store both user and assistant messages
+                    await SessionManager.store_message(
+                        user_id=user_id,
+                        message=user_message,
+                        role="user"
+                    )
+                    await SessionManager.store_message(
+                        user_id=user_id,
+                        message=final_response_content,
+                        role="assistant"
+                    )
+                    logger.debug(f"📝 Stored both messages for {handling_agent}")
+                # Also update old cache for backwards compatibility
+                await add_to_conversation_cache(user_id, user_message, "user")
+                await add_to_conversation_cache(user_id, final_response_content, "assistant")
+            except Exception as exc:
+                logger.warning(f"⚠️ Failed to update conversation storage: {exc}")
+
+            # Handle completion detection for directly-routed specialists
+            # Check if specialist session should end based on response content
+            try:
+                if handling_agent == "PainAssessmentAgent":
+                    # Check if pain assessment completed
+                    if '"assessment_complete": true' in final_response_content or '"assessment_complete":true' in final_response_content:
+                        logger.info(f"🏁 Pain assessment completed for user {user_id} (direct route)")
+                        await SessionManager.end_specialist_session(
+                            user_id=user_id,
+                            agent_type="pain",
+                            clear_history=True
                         )
-                    else:
-                        logger.info(
-                            "🗣️ Pain agent response (non-question): %s",
-                            final_response_content,
+                    elif "pain assessment session closed" in final_response_content.lower():
+                        logger.info(f"🚪 Pain assessment manually exited for user {user_id} (direct route)")
+                        await SessionManager.end_specialist_session(
+                            user_id=user_id,
+                            agent_type="pain",
+                            clear_history=True
                         )
 
-            # Store messages based on which agent handled the request
-            if handling_agent == "EnhancedPainAssessmentAgent":
-                logger.info(f"🔴 Pain agent handled request - storing in pain session for {user_id}")
+                elif handling_agent == "TrainingAgent":
+                    # Check if training program created
+                    if "programme créé avec succès" in final_response_content.lower() or "✅ programme créé" in final_response_content.lower():
+                        logger.info(f"🏁 Training program completed for user {user_id} (direct route)")
+                        await SessionManager.end_specialist_session(
+                            user_id=user_id,
+                            agent_type="training",
+                            clear_history=True
+                        )
+            except Exception as detection_error:
+                logger.warning(f"⚠️ Could not detect specialist completion: {detection_error}")
 
-                # START pain session if not already active (first pain agent interaction)
-                if not await is_pain_agent_session_active(user_id):
-                    logger.info(f"🔴 Starting new pain session for {user_id}")
-                    await start_pain_agent_session(user_id)
-
-                    # Extract body_region from user message and store it
-                    body_region = extract_body_region_from_message(user_message)
-                    await set_pain_session_body_region(user_id, body_region)
-                    logger.info(f"🔍 Extracted and stored body_region='{body_region}' for new pain session")
-
-                    # 🧠 NOTE: Initial RAG retrieval is now the pain agent's responsibility
-                    # The pain agent will call retrieve_with_llm_queries() tool after understanding
-                    # the pain location through conversation, not through keyword matching.
-                    # This ensures true AI-driven semantic understanding instead of pattern matching.
-
-                # ALWAYS add both user message and assistant response to the pain session storage
-                # (the user message was used in context building but not yet persisted to session)
-                await add_to_pain_agent_session(user_id, user_message, "user")
-                await add_to_pain_agent_session(user_id, final_response_content, "assistant")
-
-                # 🧠 MEM0 STORAGE DISABLED FOR PAIN AGENT
-                # Pain assessments will be stored in normal database after summary generation
-                # Mem0 is now used only by QA agent for general user information (diet, allergies, gym access, etc.)
-
-                # # 🧠 STORE TO MEM0 (long-term memory extraction)
-                # # Mem0 automatically extracts meaningful facts from conversations
-                # try:
-                #     from app.core.cache import get_pain_session_body_region
-                #
-                #     mem0_client = get_mem0_client()
-                #     if mem0_client:
-                #         # Get body_region from session (set during RAG tool calls or initial extraction)
-                #         body_region = await get_pain_session_body_region(user_id)
-                #
-                #         # Store user message with pain context metadata
-                #         mem0_client.add_memory(
-                #             message=user_message,
-                #             user_id=user_id,
-                #             metadata={
-                #                 "type": "pain_conversation",
-                #                 "body_region": body_region,
-                #                 "role": "user",
-                #                 "agent": "EnhancedPainAssessmentAgent"
-                #             }
-                #         )
-                #         logger.debug(f"🧠 Stored user message to Mem0 for user={user_id} region={body_region}")
-                # except Exception as e:
-                #     logger.warning(f"⚠️ Failed to store user message to Mem0: {e}")
-                #     # Don't fail the request if Mem0 storage fails
-
-                # Pain session remains active for next turn
+            # Track last handling agent
+            if handling_agent == "PainAssessmentAgent":
+                _LAST_AGENT_BY_USER[user_id] = "PainAssessmentAgent"
+            elif handling_agent == "TrainingAgent":
+                _LAST_AGENT_BY_USER[user_id] = "TrainingAgent"
             elif handling_agent == "GeneralQAAgent":
-                # QA agent handled request - store to Mem0 for general user information
-                logger.info(f"🟢 QA agent handled request - storing to Mem0 for {user_id}")
+                # General QA handled the query directly
+                _LAST_AGENT_BY_USER[user_id] = "GeneralQAAgent"
 
-                # End pain session if active (user switched to Q&A)
-                if await is_pain_agent_session_active(user_id):
-                    logger.info(f"🟢 QA agent handled request - ending pain session for {user_id}")
-                    await end_pain_agent_session(user_id)
-
-                # 🧠 STORE TO MEM0 (for general user information - diet, allergies, gym, preferences)
+                # Store general QA conversations to Mem0
                 try:
                     mem0_client = get_mem0_client()
                     if mem0_client:
-                        # Store user message (Mem0 will extract facts automatically)
-                        await asyncio.to_thread(
+                        result = await asyncio.to_thread(
                             mem0_client.add_memory,
                             message=user_message,
                             user_id=user_id,
                             metadata={
                                 "type": "qa_conversation",
                                 "role": "user",
-                                "agent": "GeneralQAAgent"
+                                "agent": "GeneralQAAgent",
                             },
                         )
-                        logger.info(f"🧠 Stored QA user message to Mem0 for user={user_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to store QA message to Mem0: {e}")
-                    # Don't fail the request if Mem0 storage fails
+                        # Log outcome and invalidate cache on success so next turn sees fresh data
+                        if isinstance(result, dict) and result.get("success"):
+                            logger.info("🧠 [Mem0] Saved QA user message (%s chars)", len(user_message))
+                            try:
+                                from app.core.cache import invalidate_user_memories_cache
+                                invalidate_user_memories_cache(user_id)
+                            except Exception as cache_exc:
+                                logger.debug(f"🧠 [Mem0] Cache invalidate skipped: {cache_exc}")
+                        else:
+                            err = (result or {}).get("error") if isinstance(result, dict) else "unknown error"
+                            logger.warning(f"⚠️ [Mem0] Save returned unsuccessful result: {err}")
+                except Exception as exc:
+                    logger.warning(f"⚠️ Failed to store QA message to Mem0: {exc}")
 
-            elif handling_agent and handling_agent != "CentralRouterAgent":
-                # Different specialist agent handled request - end pain session if active
-                if await is_pain_agent_session_active(user_id):
-                    logger.info(f"🟢 Different agent ({handling_agent}) handled request - ending pain session for {user_id}")
-                    await end_pain_agent_session(user_id)
-            elif handling_agent == "CentralRouterAgent":
-                # Router handled request directly (shouldn't happen normally, but handle it)
-                # Check if user message suggests starting a pain session (router will handoff next turn)
-                # For now, don't start a session preemptively
-                pass
-
-            # Build final conversation like Node: history + current user + assistant
             conversation_messages = list(prior_history)
             conversation_messages.append({"role": "user", "content": user_message})
             conversation_messages.append({"role": "assistant", "content": final_response_content})
-
             filtered_messages = [m for m in conversation_messages if m.get("role") != "system"]
             yield emit_vc_event("message_stop", filtered_messages)
 
-        except Exception as e:
-            logger.error(f"[VC Compat] Error: {e}", exc_info=True)
-            # Emit a best-effort message_stop so clients can finalize state
-            fallback_conv = list(request.conversationHistory or [])
-            fallback_conv.append({"role": "user", "content": request.message})
-            fallback_conv.append({"role": "assistant", "content": "An error occurred. Please try again."})
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error(f"[VC Compat] Error: {exc}", exc_info=True)
+            fallback_conv = list(prior_history)
+            fallback_conv.append({"role": "user", "content": user_message})
+            fallback_conv.append({"role": "assistant", "content": "Une erreur est survenue. Merci de réessayer."})
             filtered = [m for m in fallback_conv if m.get("role") != "system"]
             yield emit_vc_event("message_stop", filtered)
 
@@ -1117,14 +1262,13 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
         headers={
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Transfer-Encoding": "chunked",  # Critical for Docker streaming
+            "Transfer-Encoding": "chunked",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "*",
         },
     )
-
 
 # Register the same handler on the namespaced router so /api/v1/chat/virtual-coach/chat still works
 router.add_api_route(
@@ -1134,7 +1278,7 @@ router.add_api_route(
 )
 
 
-__all__ = ["router", "legacy_router", "get_or_build_workflow", "warmup_agents"]
+__all__ = ["router", "legacy_router", "warmup_agents"]
 
 # user memories 
 @router.get("/memories/{user_id}")

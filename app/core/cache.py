@@ -90,6 +90,16 @@ async def cache_user_memories(user_id: str, memories: List[Dict[str, Any]]) -> N
         logger.warning(f"User memories cache write failed for {user_id}: {e}")
 
 
+def invalidate_user_memories_cache(user_id: str) -> None:
+    """Synchronous helper to invalidate cached user memories (used after writes)."""
+    try:
+        redis_client = get_sync_redis()
+        redis_client.delete(_user_memories_key(user_id))
+        logger.debug(f"🧠 Invalidated user memories cache for {user_id}")
+    except Exception as exc:
+        logger.warning(f"User memories cache invalidate failed for {user_id}: {exc}")
+
+
 # --- User Profile Cache ---
 async def get_cached_user_profile(user_id: str) -> Dict[str, Any]:
     """Retrieve cached user profile from Redis."""

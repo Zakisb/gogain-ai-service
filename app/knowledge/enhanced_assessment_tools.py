@@ -11,7 +11,7 @@ import threading
 import contextvars
 from enum import Enum
 from datetime import datetime
-from llama_index.core.tools import FunctionTool
+from langchain.tools import StructuredTool
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -806,46 +806,32 @@ class EnhancedRAGAssessmentRetriever:
         return enriched
 
     def _normalize_body_region_french(self, body_region: str) -> str:
-        """Normalize French body region input to match Qdrant metadata (English keys).
+        """Validate body region matches Qdrant pain_hierarchical_chunks_v2 namespaces.
 
-        The embeddings use English region labels set at embed time:
-        back, knee, shoulder, neck, foot_ankle, hip, general.
+        Valid Qdrant namespaces (from pain_hierarchical_chunks_v2 collection):
+        - back
+        - shoulder
+        - knee
+        - neck
+        - hip
+        - foot_ankle
+
+        The LLM tool description instructs it to use these exact values.
+        This function just validates and logs.
         """
-        fr_to_en = {
-            # shoulder
-            "épaule": "shoulder",
-            "epaule": "shoulder",
-            "épaules": "shoulder",
-            "epaules": "shoulder",
-            # knee
-            "genou": "knee",
-            "genoux": "knee",
-            # back
-            "dos": "back",
-            "bas du dos": "back",
-            "lombaires": "back",
-            # neck
-            "cou": "neck",
-            # hip
-            "hanche": "hip",
-            "hanches": "hip",
-            # ankle/foot
-            "cheville": "foot_ankle",
-            "pied": "foot_ankle",
-            "cheville/pied": "foot_ankle",
-            # already English
-            "back": "back",
-            "knee": "knee",
-            "shoulder": "shoulder",
-            "neck": "neck",
-            "hip": "hip",
-            "foot_ankle": "foot_ankle",
-            "general": "general",
-        }
+        # Normalize input
         key = (body_region or "").strip().lower()
-        normalized = fr_to_en.get(key, body_region)
-        print(f"🔤 Body region normalization: '{body_region}' → '{normalized}'")
-        return normalized
+
+        # Valid Qdrant namespaces (no mapping, LLM should provide exact values)
+        valid_regions = ["back", "shoulder", "knee", "neck", "hip", "foot_ankle"]
+
+        if key in valid_regions:
+            logger.info(f"✅ Body region: '{body_region}' (valid Qdrant namespace)")
+            return key
+
+        # If LLM provided invalid region, log warning and use back as fallback
+        logger.warning(f"⚠️ Invalid body region: '{body_region}' - LLM should use exact Qdrant namespaces: {valid_regions}. Falling back to 'back'")
+        return "back"
 
     def _apply_semantic_filtering(self,
                                 nodes: List[Any],
@@ -1022,7 +1008,7 @@ def get_enhanced_assessment_retriever() -> EnhancedRAGAssessmentRetriever:
     return _enhanced_retriever
 
 
-def create_pain_summary_generator_tool() -> FunctionTool:
+def create_pain_summary_generator_tool() -> StructuredTool:
     """Create flexible tool for generating pain summary adapted to available information."""
 
     def generate_adaptive_pain_summary(body_region: str,
@@ -1162,14 +1148,14 @@ def create_pain_summary_generator_tool() -> FunctionTool:
 
         return json.dumps(summary, indent=2)
 
-    return FunctionTool.from_defaults(
-        fn=generate_adaptive_pain_summary,
+    return StructuredTool.from_function(
+        func=generate_adaptive_pain_summary,
         name="generate_adaptive_pain_summary",
         description="Generate flexible, adaptive pain summary that adjusts structure and content based on available information - no rigid templates."
     )
 
 
-def create_pain_session_exit_tool() -> FunctionTool:
+def create_pain_session_exit_tool() -> StructuredTool:
     """Create tool allowing the agent to exit pain assessment mode explicitly."""
 
     def exit_pain_assessment(body_region: str = "general") -> str:
@@ -1253,8 +1239,8 @@ def create_pain_session_exit_tool() -> FunctionTool:
             "Pain assessment session closed. Route the user back to the central assistant and acknowledge the context switch."
         )
 
-    return FunctionTool.from_defaults(
-        fn=exit_pain_assessment,
+    return StructuredTool.from_function(
+        func=exit_pain_assessment,
         name="exit_pain_assessment",
         description=(
             "Terminate the current pain assessment session immediately, clear queued questions, "
@@ -1285,7 +1271,7 @@ def initialize_global_assessment_tools():
         _enhanced_retriever = None
         _COMPILED_PATTERNS = None
 
-def create_llm_driven_rag_tool() -> FunctionTool:
+def create_llm_driven_rag_tool() -> StructuredTool:
     """Create LLM-driven RAG tool that generates queries dynamically based on conversation context."""
 
     def _collect_all_questions(consolidated_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1546,8 +1532,8 @@ def create_llm_driven_rag_tool() -> FunctionTool:
         }
         return json.dumps(status_payload, ensure_ascii=False, indent=2)
 
-    return FunctionTool.from_defaults(
-        fn=retrieve_with_llm_queries,
+    return StructuredTool.from_function(
+        func=retrieve_with_llm_queries,
         name="retrieve_with_llm_queries",
         description=(
             "Launch a background RAG refresh using agent-generated semantic queries "
@@ -1691,7 +1677,7 @@ def launch_mem0_retrieval(user_id: str, body_region: str, initial_message: str) 
     logger.info(f"🚀 [Mem0] Background retrieval thread started for user={user_id}")
 
 
-def get_enhanced_pain_assessment_tools() -> List[FunctionTool]:
+def get_enhanced_pain_assessment_tools() -> List[StructuredTool]:
     """Get tools for AI-powered pain assessment with LLM-driven RAG.
 
     Queue contents are fed directly into agent context for inspiration.

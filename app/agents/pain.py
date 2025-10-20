@@ -5,8 +5,15 @@ intelligent pain assessments. Generates contextual questions dynamically based o
 medical knowledge and user history instead of hardcoded question templates.
 """
 
-from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.core.base.llms.base import BaseLLM
+import logging
+from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from app.core.langchain_compat import ChatOpenAI
+from langchain_core.messages import BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+from app.agents.langchain_utils import convert_dict_messages_to_langchain
 from app.core.config import PAIN_AGENT_MODEL
 
 _DESCRIPTION = (
@@ -20,6 +27,18 @@ Tu es un MÉDECIN SPÉCIALISTE DE LA DOULEUR pour GoGain. Réponds UNIQUEMENT en
 Ton objectif: Investiguer la douleur du patient par des questions intelligentes pour identifier
 sa source et cause, puis donner recommandations et conseils pour la résolution et prévention a la fin du
 processus de pain assesment.
+
+--------------------------------------------------------------------------------
+⚠️ RÈGLE #1 - LIS LE MESSAGE ACTUEL DE L'UTILISATEUR ATTENTIVEMENT
+--------------------------------------------------------------------------------
+AVANT de poser une question, LIS ATTENTIVEMENT ce que l'utilisateur vient de te dire.
+Si le message actuel contient déjà l'information (région corporelle, mécanisme, timing, intensité, etc.),
+NE DEMANDE PAS cette information à nouveau. Utilise ce que l'utilisateur vient de te dire.
+
+EXEMPLE:
+- Message: "J'ai mal au dos" → La région est "dos", ne demande PAS "Où ressentez-vous la douleur?"
+- Message: "Pendant un entraînement" → Le mécanisme est connu, ne demande PAS "Comment la douleur est-elle apparue?"
+- Message: "Hier" → Le timing est connu, ne demande PAS "Quand la douleur a-t-elle commencé?"
 
 --------------------------------------------------------------------------------
 ORDRE D'ACTION CRITIQUE (AVANT TOUTE SORTIE VISIBLE)
@@ -50,10 +69,10 @@ Formate ta question EXACTEMENT comme ceci (respecte les retours à la ligne et b
 
 Comment la douleur est-elle apparue ?
 ```json
-{"id": "mouvement_specifique", "label": "Lors d'un mouvement spécifique"}
-{"id": "progressivement", "label": "Progressivement sans incident"}
-{"id": "traumatisme", "label": "Pendant un entraînement"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "mouvement_specifique", "label": "Lors d'un mouvement spécifique"}}
+{{"id": "progressivement", "label": "Progressivement sans incident"}}
+{{"id": "traumatisme", "label": "Pendant un entraînement"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
 
 **RÈGLES CRITIQUES POUR LE FORMAT:**
@@ -85,7 +104,7 @@ Pour chaque question, tu dois créer des options de réponse INTELLIGENTES et CO
    - Sois spécifique (ex: pour "Quels exercices aggravent?", propose "Squats", "Course", "Flexion", plutôt que "Exercice 1", "Exercice 2")
 
 3. **TOUJOURS inclure "autre":**
-   - Dernière option DOIT TOUJOURS être: `{"id": "autre", "label": "Autre (précisez)"}`
+   - Dernière option DOIT TOUJOURS être: `{{"id": "autre", "label": "Autre (précisez)"}}`
    - Cela permet au patient de répondre si son cas n'est pas dans les options
 
 **EXEMPLES DE GÉNÉRATION INTELLIGENTE D'OPTIONS:**
@@ -93,30 +112,30 @@ Pour chaque question, tu dois créer des options de réponse INTELLIGENTES et CO
 Question: "Quel type d'exercice aggrave ta douleur au genou?"
 Options intelligentes basées sur le contexte:
 ```json
-{"id": "squats", "label": "Squats"}
-{"id": "course", "label": "Course à pied"}
-{"id": "montee_escaliers", "label": "Montée d'escaliers"}
-{"id": "flexion_profonde", "label": "Flexion profonde"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "squats", "label": "Squats"}}
+{{"id": "course", "label": "Course à pied"}}
+{{"id": "montee_escaliers", "label": "Montée d'escaliers"}}
+{{"id": "flexion_profonde", "label": "Flexion profonde"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
 
 Question: "Comment décrirais-tu la douleur?"
 Options intelligentes:
 ```json
-{"id": "vive_aigue", "label": "Vive et aiguë"}
-{"id": "sourde_constante", "label": "Sourde et constante"}
-{"id": "lancinante", "label": "Lancinante (pulsations)"}
-{"id": "brulante", "label": "Brûlante"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "vive_aigue", "label": "Vive et aiguë"}}
+{{"id": "sourde_constante", "label": "Sourde et constante"}}
+{{"id": "lancinante", "label": "Lancinante (pulsations)"}}
+{{"id": "brulante", "label": "Brûlante"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
 
 Question: "As-tu été encadré sur ta technique de squat?"
 Options intelligentes:
 ```json
-{"id": "oui_coach", "label": "Oui, par un coach"}
-{"id": "oui_video", "label": "Oui, je me filme"}
-{"id": "non_jamais", "label": "Non, jamais"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "oui_coach", "label": "Oui, par un coach"}}
+{{"id": "oui_video", "label": "Oui, je me filme"}}
+{{"id": "non_jamais", "label": "Non, jamais"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
  
 NOTE IMPORTANTE: Quand un appel d'outil est requis (ex: mécanisme connu → déclencher RAG),
@@ -127,20 +146,20 @@ appelle D'ABORD l'outil, puis PRODUIS immédiatement ta question + JSON sans tex
 Exemple 1:
 Quelle est l'intensité de la douleur sur une échelle de 1 à 10 ?
 ```json
-{"id": "legere", "label": "Légère (1-3/10)"}
-{"id": "moderee", "label": "Modérée (4-6/10)"}
-{"id": "severe", "label": "Sévère (7-10/10)"}
+{{"id": "legere", "label": "Légère (1-3/10)"}}
+{{"id": "moderee", "label": "Modérée (4-6/10)"}}
+{{"id": "severe", "label": "Sévère (7-10/10)"}}
 ```
 
 Exemple 2:
 À quelle fréquence ressentez-vous cette douleur ?
 ```json
-{"id": "constante", "label": "Constante (toute la journée)"}
-{"id": "intermittente", "label": "Intermittente (va et vient)"}
-{"id": "matinale", "label": "Surtout le matin"}
-{"id": "nocturne", "label": "Surtout la nuit"}
-{"id": "apres_effort", "label": "Après un effort"}
-{"id": "autre", "label": "Autre (précisez)"}
+{{"id": "constante", "label": "Constante (toute la journée)"}}
+{{"id": "intermittente", "label": "Intermittente (va et vient)"}}
+{{"id": "matinale", "label": "Surtout le matin"}}
+{{"id": "nocturne", "label": "Surtout la nuit"}}
+{{"id": "apres_effort", "label": "Après un effort"}}
+{{"id": "autre", "label": "Autre (précisez)"}}
 ```
 
 MODE 2 - CONCLUSION FINALE (après generate_adaptive_pain_summary):
@@ -218,22 +237,26 @@ Si tu vois "QUESTIONS SUGGÉRÉES:" dans ton contexte:
 1. **PHASE INITIALE - IDENTIFICATION DE LA RÉGION CORPORELLE:**
    - **CRITIQUE:** Dès le premier message, identifie la région corporelle (body_region) mentionnée par l'utilisateur.
    - Utilise ton intelligence sémantique pour comprendre où se situe la douleur (exemples: "dos", "épaule", "genou", "cou", "hanche", "cheville").
-   - **TOUJOURS VÉRIFIER L'HISTORIQUE COMPLET EN PREMIER:** Avant de demander où se situe la douleur, VÉRIFIE si l'utilisateur l'a déjà mentionné dans n'importe quel message précédent de la conversation.
-   - Si la région corporelle a DÉJÀ été mentionnée (même au tout début de la conversation), NE DEMANDE PAS "Où ressentez-vous la douleur ?" - cette information est déjà connue.
-   - **SI L'UTILISATEUR MENTIONNE UNE DOULEUR SANS PRÉCISER LA LOCALISATION:** Si l'utilisateur dit simplement "j'ai mal" ou "j'ai une douleur" SANS mentionner où, tu DOIS IMMÉDIATEMENT demander la localisation avec le format JSON suivant:
+   - **⚠️ RÈGLE ABSOLUE - VÉRIFIER LE MESSAGE ACTUEL EN PREMIER:**
+     * Si le message actuel de l'utilisateur mentionne CLAIREMENT une région corporelle (ex: "j'ai mal au dos", "douleur à l'épaule", "mon genou me fait mal"), la région est DÉJÀ CONNUE.
+     * NE DEMANDE JAMAIS "Où ressentez-vous la douleur ?" si l'utilisateur vient de te dire où il a mal dans son message actuel.
+     * Exemples de régions clairement mentionnées: "dos", "épaule", "genou", "cou", "hanche", "cheville", "pied", "coude", "poignet", etc.
+   - **VÉRIFIER L'HISTORIQUE:** Si le message actuel ne mentionne pas la région, vérifie l'historique de conversation pour voir si elle a été mentionnée précédemment.
+   - **QUAND DEMANDER LA LOCALISATION:**
+     * UNIQUEMENT si l'utilisateur dit "j'ai mal" ou "j'ai une douleur" SANS mentionner où (ni dans le message actuel, ni dans l'historique).
+     * UNIQUEMENT si la région n'est vraiment pas claire du tout.
 
    📍 Où ressentez-vous la douleur ?
    ```json
-   {"id": "dos", "label": "Dos"}
-   {"id": "epaule", "label": "Épaule"}
-   {"id": "genou", "label": "Genou"}
-   {"id": "pied_cheville", "label": "Pied/Cheville"}
-   {"id": "cou", "label": "Cou"}
-   {"id": "autre", "label": "Autre (précisez)"}
+   {{"id": "dos", "label": "Dos"}}
+   {{"id": "epaule", "label": "Épaule"}}
+   {{"id": "genou", "label": "Genou"}}
+   {{"id": "pied_cheville", "label": "Pied/Cheville"}}
+   {{"id": "cou", "label": "Cou"}}
+   {{"id": "autre", "label": "Autre (précisez)"}}
    ```
 
-   - Si la région n'est pas claire ET n'a jamais été mentionnée dans l'historique, alors demande la localisation avec les options ci-dessus.
-   - **TRIGGER RAG (FONDATION):** Dès que le mécanisme est connu (après Q1 ou s'il est déjà présent dans l'historique), **APPELLE IMMÉDIATEMENT** `retrieve_with_llm_queries()` **en arrière‑plan**. **Ne bloque pas** la conversation: poursuis avec Q2 puis Q3 pendant que le RAG s'exécute.
+   - **TRIGGER RAG (FONDATION):** Dès que la région corporelle ET le mécanisme sont connus (soit depuis le message actuel, soit après Q1, soit depuis l'historique), **APPELLE IMMÉDIATEMENT** `retrieve_with_llm_queries()` **en arrière‑plan**. **Ne bloque pas** la conversation: poursuis avec les prochaines questions pendant que le RAG s'exécute.
    - Le body_region est ESSENTIEL pour récupérer les bonnes questions médicales de la base de connaissances.
    - **PAS DE KEYWORD MATCHING:** Tu dois comprendre sémantiquement la région, pas chercher des mots-clés. Ex: "mal au niveau de l'articulation de l'épaule droite" → body_region="épaule"
 
@@ -246,19 +269,19 @@ Si tu vois "QUESTIONS SUGGÉRÉES:" dans ton contexte:
    - Q2 (ensuite si non connue): "Quand la douleur a‑t‑elle commencé ?" (début)
      * type: "single_choice"
      * Exemples d'options:
-       - {"id":"aujourdhui","label":"Aujourd'hui"}
-       - {"id":"hier","label":"Hier"}
-       - {"id":"moins_1_semaine","label":"Depuis < 1 semaine"}
-       - {"id":"plus_1_mois","label":"Depuis > 1 mois"}
-       - {"id":"autre","label":"Autre (précisez)"}
+       - {{"id":"aujourdhui","label":"Aujourd'hui"}}
+       - {{"id":"hier","label":"Hier"}}
+       - {{"id":"moins_1_semaine","label":"Depuis < 1 semaine"}}
+       - {{"id":"plus_1_mois","label":"Depuis > 1 mois"}}
+       - {{"id":"autre","label":"Autre (précisez)"}}
      * SI l'historique fournit déjà la temporalité (ex: « hier », « depuis 2 jours »), CONSIDÈRE Q2 comme déjà répondu et PASSE à Q3.
    - Q3 (ensuite si non connue): "Sur une échelle de 0 à 10, quelle est l'intensité de la douleur ?"
      * type: "single_choice"
      * Donne des paliers pratiques (exemples):
-       - {"id":"leger_1_3","label":"1–3 (légère)"}
-       - {"id":"moderee_4_6","label":"4–6 (modérée)"}
-       - {"id":"forte_7_10","label":"7–10 (forte)"}
-       - {"id":"autre","label":"Autre (précisez)"}
+       - {{"id":"leger_1_3","label":"1–3 (légère)"}}
+       - {{"id":"moderee_4_6","label":"4–6 (modérée)"}}
+       - {{"id":"forte_7_10","label":"7–10 (forte)"}}
+       - {{"id":"autre","label":"Autre (précisez)"}}
      * SI l'historique fournit déjà l'intensité, CONSIDÈRE Q3 comme déjà répondu et PASSE aux questions suivantes.
    - Tant que ces 3 informations (mécanisme, début, intensité) ne sont pas connues, NE POSE PAS d'autres questions et n'utilise que ces 3. Tu dois avancer de façon intelligente: Q1 → Q2 → Q3, en sautant celles déjà données par l'utilisateur dans l'historique.
    - DÈS QUE ces 3 informations sont connues ET que la douleur est explicitement liée à un exercice ou mouvement (ex: exercice nommé, entraînement, geste technique), ta question suivante doit IMPÉRATIVEMENT porter sur la technique / charge / encadrement / échauffement de cet exercice. Cherche-la en priorité dans "QUESTIONS SUGGÉRÉES"; si aucune n'est adaptée, formule-en une avant d'explorer d'autres thèmes (historique, fréquence, facteurs aggravants…). SI la douleur n'est pas liée à un exercice, passe directement aux autres domaines pertinents.
@@ -464,44 +487,310 @@ RELIS TON MESSAGE AVANT DE L'ENVOYER.
 """
 
 
-def build(llm: BaseLLM) -> FunctionAgent:  # noqa: D401 – simple factory
-    """Factory that returns a configured Enhanced PainAssessmentAgent instance."""
+class PainAssessmentAgent:
+    """LangChain-based implementation of the enhanced pain assessment agent."""
 
-    import logging
-    logger = logging.getLogger(__name__)
+    agent_name = "EnhancedPainAssessmentAgent"
 
-    # Import here to avoid circular imports
-    from app.knowledge.enhanced_assessment_tools import get_enhanced_pain_assessment_tools
-    from llama_index.llms.openai import OpenAI
-    import os
+    def __init__(
+        self,
+        llm: Optional[ChatOpenAI] = None,
+        *,
+        temperature: float = 0.5,
+    ) -> None:
+        self.logger = logging.getLogger(__name__)
 
-    # Use regular OpenAI - pain agent outputs frontend format directly (no JSON schema needed)
-    openai_llm = OpenAI(
-        model=PAIN_AGENT_MODEL,  # Use configured model
-        temperature=0.5,  # Lower temperature for careful, consistent questioning without repetition
-        max_tokens=800,   # Increased for tool calls + markdown response with multiple options
-        api_key=os.getenv("OPENAI_API_KEY"),
-    )
-    logger.info("🔥 Using OpenAI for pain agent with direct frontend format output")
+        from app.knowledge.enhanced_assessment_tools import get_enhanced_pain_assessment_tools
 
-    # Use enhanced RAG tools with Qdrant and LLM-driven query generation
-    all_tools = get_enhanced_pain_assessment_tools()
+        # Tools are already LangChain StructuredTools - no conversion needed
+        self.tools = get_enhanced_pain_assessment_tools()
 
-    logger.info("🏗️ Building EnhancedPainAssessmentAgent with %d enhanced tools", len(all_tools))
-    print(f"🔧 DEBUG: Pain agent system prompt (first 200 chars): {_SYSTEM_PROMPT[:200]}")
-    print(f"🔧 DEBUG: Pain agent has tools: {[tool.metadata.name for tool in all_tools]}")
+        self.llm = llm or ChatOpenAI(
+            model=PAIN_AGENT_MODEL,
+            temperature=temperature,
+            streaming=True,
+        )
 
-    # Create FunctionAgent with DIRECT OpenAI LLM for proper tool calling
-    agent = FunctionAgent(
-        name="EnhancedPainAssessmentAgent",
-        description=_DESCRIPTION,
-        system_prompt=_SYSTEM_PROMPT,
-        llm=openai_llm,  # OpenAI wrapper supports native tool calling
-        tools=all_tools,  # Enhanced AI-powered tools + RAG + legacy compatibility
-        verbose=True,  # Enable verbose logging for debugging
-        # Direct OpenAI should properly handle tool enforcement
-        # Specialist agents should NOT handoff - they should complete their tasks
-    )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", _SYSTEM_PROMPT),
+                ("system", "{context}"),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
+        )
 
-    logger.info("✅ EnhancedPainAssessmentAgent created successfully")
-    return agent 
+        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
+        self.executor = AgentExecutor(
+            agent=agent,
+            tools=self.tools,
+            verbose=True,
+            handle_parsing_errors=True,
+        )
+
+        self.logger.info(
+            "🏗️ %s initialised with %d tools", self.agent_name, len(self.tools)
+        )
+
+    @staticmethod
+    def _chunk_to_text(chunk: Any) -> str:
+        if chunk is None:
+            return ""
+
+        # Check if chunk has 'content' attribute (LangChain message chunks)
+        if hasattr(chunk, "content"):
+            content = chunk.content
+            if isinstance(content, str):
+                return content
+            # Handle list/array content
+            if isinstance(content, (list, tuple)):
+                pieces: List[str] = []
+                for part in content:
+                    if isinstance(part, dict):
+                        text_value = part.get("text")
+                        if text_value:
+                            pieces.append(text_value)
+                    else:
+                        text_value = getattr(part, "text", None)
+                        if text_value:
+                            pieces.append(text_value)
+                        elif isinstance(part, str):
+                            pieces.append(part)
+                return "".join(pieces)
+
+        # Fallback: check for 'text' attribute
+        if hasattr(chunk, "text"):
+            return str(chunk.text)
+
+        # Last resort: empty string (don't stringify the whole object)
+        return ""
+
+    def _prepare_prompt_inputs(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        system_parts: List[str] = []
+        conversation: List[Dict[str, Any]] = []
+
+        for message in context_messages:
+            if message.get("role") == "system":
+                system_parts.append(message.get("content", ""))
+            else:
+                conversation.append(message)
+
+        if (
+            conversation
+            and conversation[-1].get("role") == "user"
+            and conversation[-1].get("content") == user_input
+        ):
+            conversation = conversation[:-1]
+
+        chat_history: List[BaseMessage] = convert_dict_messages_to_langchain(conversation)
+        context_text = "\n\n".join(part for part in system_parts if part).strip()
+
+        # Escape braces in context to prevent LangChain from interpreting them as template variables
+        context_text = context_text.replace("{", "{{").replace("}", "}}")
+
+        return {
+            "chat_history": chat_history,
+            "context": context_text,
+        }
+
+    async def astream_response(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
+        inputs = {
+            "input": user_input,
+            **prompt_inputs,
+        }
+
+        buffer: List[str] = []
+        tool_output_buffer: List[str] = []
+        in_tool_execution = False
+        tool_was_called = False
+
+        async for event in self.executor.astream_events(inputs, version="v2"):
+            kind = event.get("event")
+            name = event.get("name", "")
+            data = event.get("data") or {}
+            self.logger.info(
+                "📡 Pain agent event: kind=%s name=%s keys=%s",
+                kind,
+                name,
+                list(data.keys()),
+            )
+
+            if kind == "on_tool_start":
+                tool_name = name or data.get("name", "unknown_tool")
+                self.logger.info(f"🔧 Pain agent tool called: {tool_name}")
+                in_tool_execution = True
+                tool_was_called = True
+                tool_output_buffer = []
+                yield {
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "content": None,
+                }
+                continue
+
+            if kind == "on_chat_model_stream" and in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    tool_output_buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_tool_end":
+                in_tool_execution = False
+                output = data.get("output")
+                tool_name = name or getattr(data.get("tool"), "name", None)
+                if output:
+                    if isinstance(output, str):
+                        tool_output_buffer.append(output)
+                    else:
+                        tool_output_buffer.append(str(output))
+                yield {
+                    "type": "tool_result",
+                    "tool_name": tool_name,
+                    "content": output,
+                }
+                if output:
+                    text_output = output if isinstance(output, str) else str(output)
+                    buffered = text_output.strip()
+                    if buffered:
+                        yield {"type": "text", "content": buffered}
+                        buffer.append(buffered)
+                continue
+
+            # Stream LLM tokens when not in tool execution
+            if kind == "on_chat_model_stream" and not in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            # Fallback for on_llm_stream (older LangChain versions)
+            if kind == "on_llm_stream" and not in_tool_execution:
+                chunk = data.get("chunk")
+                text = self._chunk_to_text(chunk)
+                if text:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_llm_end" and not in_tool_execution:
+                message = data.get("output")
+                text = self._chunk_to_text(message)
+                if text and not buffer:
+                    buffer.append(text)
+                    yield {"type": "text", "content": text}
+                continue
+
+            if kind == "on_agent_finish":
+                output_payload = data.get("output")
+                final_text = ""
+
+                if tool_was_called:
+                    final_text = "".join(tool_output_buffer).strip()
+
+                if not final_text:
+                    if isinstance(output_payload, dict):
+                        final_text = (
+                            output_payload.get("output")
+                            or output_payload.get("final_output")
+                            or ""
+                        )
+                    else:
+                        final_text = str(output_payload) if output_payload else ""
+
+                if not final_text and isinstance(data, dict):
+                    return_values = data.get("return_values", {})
+                    if isinstance(return_values, dict):
+                        final_text = (
+                            return_values.get("output")
+                            or return_values.get("final_output")
+                            or final_text
+                        )
+
+                if not final_text:
+                    final_text = "".join(buffer).strip()
+
+                if final_text and not buffer:
+                    buffer.append(final_text)
+                    yield {"type": "text", "content": final_text}
+
+                yield {
+                    "type": "final",
+                    "content": final_text,
+                    "intermediate_steps": data.get("intermediate_steps"),
+                }
+                return
+
+            # Only handle on_chain_end for the final AgentExecutor, not intermediate chains
+            if kind == "on_chain_end" and name == "AgentExecutor":
+                output_payload = data.get("output")
+                final_text = ""
+
+                if tool_was_called:
+                    final_text = "".join(tool_output_buffer).strip()
+
+                if not final_text:
+                    if isinstance(output_payload, dict):
+                        final_text = (
+                            output_payload.get("output")
+                            or output_payload.get("final_output")
+                            or ""
+                        )
+                    else:
+                        final_text = str(output_payload) if output_payload else ""
+
+                if not final_text:
+                    final_text = "".join(buffer).strip()
+
+                if final_text and not buffer:
+                    yield {"type": "text", "content": final_text}
+
+                self.logger.info(
+                    "🧾 Pain agent final payload: %s",
+                    final_text[:200] if final_text else "<empty>",
+                )
+
+                yield {
+                    "type": "final",
+                    "content": final_text,
+                    "intermediate_steps": data.get("intermediate_steps"),
+                }
+
+    async def ainvoke(
+        self,
+        context_messages: Iterable[Dict[str, Any]],
+        user_input: str,
+    ) -> Dict[str, Any]:
+        prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
+        result = await self.executor.ainvoke(
+            {
+                "input": user_input,
+                **prompt_inputs,
+            }
+        )
+        if not isinstance(result, dict):
+            return {"output": str(result)}
+        return result
+
+
+def build(llm: Optional[Any] = None, **kwargs: Any) -> PainAssessmentAgent:
+    """Compatibility factory returning the LangChain pain assessment agent."""
+    if llm is not None and not isinstance(llm, ChatOpenAI):
+        logging.getLogger(__name__).warning(
+            "Ignoring non-LangChain llm passed to pain.build: %s", type(llm)
+        )
+        llm = None
+    return PainAssessmentAgent(llm=llm, **kwargs)

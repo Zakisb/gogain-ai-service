@@ -8,7 +8,7 @@ This tool allows the QA agent to search and retrieve user memories such as:
 - Personal goals and preferences
 """
 
-from llama_index.core.tools import FunctionTool
+from langchain.tools import StructuredTool
 from typing import List, Dict, Any, Optional
 import logging
 
@@ -83,10 +83,10 @@ def search_user_memories(query: str, limit: int = 5, user_id: Optional[str] = No
         return "Could not access memory system. Please provide the information directly."
 
 
-def get_memory_search_tool() -> FunctionTool:
+def get_memory_search_tool() -> StructuredTool:
     """Factory function to create the memory search tool for QA agent."""
-    return FunctionTool.from_defaults(
-        fn=search_user_memories,
+    return StructuredTool.from_function(
+        func=search_user_memories,
         name="search_user_memories",
         description=(
             "Search user's stored personal information (diet, allergies, gym access, schedule, goals). "

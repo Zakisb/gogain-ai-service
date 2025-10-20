@@ -69,7 +69,13 @@ class Mem0Client:
             # Auto-enrich metadata with temporal information (non-breaking)
             base_meta = metadata.copy() if isinstance(metadata, dict) else {}
             base_meta.update(self._build_temporal_metadata())
-            result = self.client.add(messages=message, user_id=user_id, metadata=base_meta)
+            # Store raw message text; disable inference so content is stored as-is
+            result = self.client.add(
+                messages=message,
+                user_id=user_id,
+                metadata=base_meta,
+                infer=False,
+            )
             return {"success": True, "result": result}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -78,6 +84,18 @@ class Mem0Client:
         try:
             result = self.client.get_all(user_id=user_id, limit=limit)
             memories = result.get('results', []) if isinstance(result, dict) else result
+            # Normalize fields: expose memory content via both 'memory' and 'content'
+            normalized = []
+            for item in memories or []:
+                if isinstance(item, dict):
+                    if 'content' not in item or item.get('content') in (None, ""):
+                        if 'memory' in item and item['memory'] not in (None, ""):
+                            item = dict(item)  # shallow copy to avoid mutations on shared objects
+                            item['content'] = item['memory']
+                    normalized.append(item)
+                else:
+                    normalized.append(item)
+            memories = normalized
             return {"success": True, "memories": memories}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -86,6 +104,17 @@ class Mem0Client:
         try:
             result = self.client.search(query=query, user_id=user_id, limit=limit)
             memories = result.get('results', []) if isinstance(result, dict) else result
+            normalized = []
+            for item in memories or []:
+                if isinstance(item, dict):
+                    if 'content' not in item or item.get('content') in (None, ""):
+                        if 'memory' in item and item['memory'] not in (None, ""):
+                            item = dict(item)
+                            item['content'] = item['memory']
+                    normalized.append(item)
+                else:
+                    normalized.append(item)
+            memories = normalized
             return {"success": True, "memories": memories}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -248,7 +277,6 @@ def get_mem0_client():
 # Export lazy-loaded client (will be None if no MEM0_API_KEY)
 # Skip initialization at module load to prevent blocking startup
 mem0_client = None
-print("💡 Mem0 client will be initialized on first use to prevent blocking startup")
 
 
 # ---- Internal time helpers ----

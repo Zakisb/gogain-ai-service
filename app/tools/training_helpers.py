@@ -330,11 +330,21 @@ def create_user_training_program(
         frequency = len(training_days)
 
         async def _create(tx) -> Dict[str, Any]:
+            # Ensure only one active program by deactivating existing ones before creating the new program
+            await tx.execute(
+                """
+                UPDATE "UserTrainingProgram"
+                SET status = 'INACTIVE'
+                WHERE "userId" = %s AND status = 'ACTIVE'
+                """,
+                (int(user_id),),
+            )
+
             program_id = await tx.insert(
                 """
                 INSERT INTO "UserTrainingProgram"
-                (name, description, "userId", "focusId", duration, frequency, "startDate", "endDate")
-                VALUES (%s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp)
+                (name, description, "userId", "focusId", duration, frequency, "startDate", "endDate", status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s::timestamp, %s::timestamp, %s::"TrainingProgramStatus")
                 RETURNING id
                 """,
                 (
@@ -346,6 +356,7 @@ def create_user_training_program(
                     frequency,
                     start_date.isoformat(),  # Convert date to string
                     end_date.isoformat(),    # Convert date to string
+                    "ACTIVE",
                 ),
             )
 

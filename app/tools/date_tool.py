@@ -1,11 +1,12 @@
 """Date/Time tools for agents: ISO 8601, Unix, French human-readable, and YYYY-MM-DD.
 
 Backwards compatible: retains `get_current_date` and `get_date_tool`.
+Fully migrated to LangChain.
 """
 
 from datetime import datetime, timezone
 import time as _time
-from llama_index.core.tools import FunctionTool
+from langchain.tools import StructuredTool
 from typing import Dict
 
 
@@ -80,19 +81,19 @@ def current_datetime_context_line() -> str:
     return f"Current date and time: {f['iso8601']} ({f['french_human']})"
 
 
-def get_date_tool() -> FunctionTool:
+def get_date_tool() -> StructuredTool:
     """Factory function to create the legacy date tool (YYYY-MM-DD)."""
-    return FunctionTool.from_defaults(
-        fn=get_current_date,
+    return StructuredTool.from_function(
+        func=get_current_date,
         name="get_current_date",
         description="Get today's date in YYYY-MM-DD format. Use this whenever you need the current date."
     )
 
 
-def get_datetime_formats_tool() -> FunctionTool:
+def get_datetime_formats_tool() -> StructuredTool:
     """Factory creating a tool that returns multiple datetime formats (ISO, Unix, French, YYYY-MM-DD)."""
-    return FunctionTool.from_defaults(
-        fn=get_current_datetime_formats,
+    return StructuredTool.from_function(
+        func=get_current_datetime_formats,
         name="get_current_datetime_formats",
         description=(
             "Obtenir la date/heure actuelle aux formats: ISO 8601 (Z), Unix (secondes.écart), "
@@ -101,10 +102,10 @@ def get_datetime_formats_tool() -> FunctionTool:
     )
 
 
-def get_datetime_context_line_tool() -> FunctionTool:
+def get_datetime_context_line_tool() -> StructuredTool:
     """Factory creating a tool that returns a combined context line for current datetime."""
-    return FunctionTool.from_defaults(
-        fn=current_datetime_context_line,
+    return StructuredTool.from_function(
+        func=current_datetime_context_line,
         name="get_current_datetime_context_line",
         description=(
             "Obtenir une ligne de contexte avec la date/heure actuelle: "

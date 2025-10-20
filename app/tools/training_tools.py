@@ -1,4 +1,4 @@
-"""Training tools for LlamaIndex agents.
+"""Training tools for LangChain agents.
 
 This module provides tools for managing training programs, including checking
 existing programs, retrieving templates, creating custom programs, and accessing
@@ -7,7 +7,7 @@ program details.
 
 import logging
 from typing import List
-from llama_index.core.tools import FunctionTool
+from langchain.tools import StructuredTool
 
 from app.core.cache import invalidate_user_training_program_cache
 from app.core.memory import get_mem0_client
@@ -48,7 +48,6 @@ def get_programs() -> str:
 
 
 def save_fitness_goal_assessment(
-    user_id: str,
     fitness_goal_summary: str
 ) -> str:
     """Save fitness goal assessment summary to Mem0 for long-term memory.
@@ -57,7 +56,6 @@ def save_fitness_goal_assessment(
     the complete assessment including user goals, preferences, and constraints.
 
     Args:
-        user_id: User ID (injected programmatically by workflow, not by LLM)
         fitness_goal_summary: Complete summary of fitness goal assessment including:
                              - Primary fitness goal
                              - All answers to goal-specific questions
@@ -66,11 +64,18 @@ def save_fitness_goal_assessment(
 
     Returns:
         Success or error message
+
+    Note:
+        user_id is retrieved from server context (set by API layer), NOT from AI.
     """
     try:
-        # user_id is injected by workflow; fail fast if missing
-        if not user_id:
-            logger.error("save_fitness_goal_assessment called without user_id")
+        # Get user_id from context (set by API layer via set_user_context, NOT from AI)
+        from app.knowledge.enhanced_assessment_tools import get_user_context
+        user_id = get_user_context()
+
+        # Fail fast if user_id not set by server
+        if not user_id or user_id == "unknown_user":
+            logger.error("save_fitness_goal_assessment called without valid user_id in context")
             return "Impossible d'identifier l'utilisateur pour sauvegarder l'évaluation."
 
         # Get Mem0 client
@@ -110,8 +115,7 @@ def create_training_program(
     level: str,
     training_frequency: int,
     available_equipments: List[str],
-    zone_target: str = None,
-    user_id: str = None
+    zone_target: str = None
 ) -> str:
     """Create a personalized AI-generated training program for the user.
 
@@ -125,15 +129,21 @@ def create_training_program(
         available_equipments: List of available equipment (e.g., ["Haltères", "Tapis", "Barre"])
         zone_target: Optional target body zone - one of: "HAUT DU CORPS", "BAS DU CORPS", "CEINTURE ABDOMINALE", "CORPS COMPLET"
                      Required only if goal is "REDESSINER SA SILHOUETTE", ignored for "RESTER EN FORME"
-        user_id: User ID (injected programmatically by workflow, not by LLM)
 
     Returns:
         Success or error message
+
+    Note:
+        user_id is retrieved from server context (set by API layer), NOT from AI.
     """
     try:
-        # user_id is injected by workflow; fail fast if missing to avoid ambiguity
-        if not user_id:
-            logger.error("create_training_program called without user_id")
+        # Get user_id from context (set by API layer via set_user_context, NOT from AI)
+        from app.knowledge.enhanced_assessment_tools import get_user_context
+        user_id = get_user_context()
+
+        # Fail fast if user_id not set by server
+        if not user_id or user_id == "unknown_user":
+            logger.error("create_training_program called without valid user_id in context")
             return "Impossible d'identifier l'utilisateur pour créer le programme."
         # Validate inputs
         valid_goals = ["RESTER EN FORME", "REDESSINER SA SILHOUETTE"]
@@ -192,12 +202,12 @@ def create_training_program(
         return f"Erreur lors de la création du programme d'entraînement: {str(e)}"
 
 
-# Factory functions to create LlamaIndex tools
+# Factory functions to create LangChain tools
 
-def get_programs_tool() -> FunctionTool:
+def get_programs_tool() -> StructuredTool:
     """Factory to create the get_programs tool."""
-    return FunctionTool.from_defaults(
-        fn=get_programs,
+    return StructuredTool.from_function(
+        func=get_programs,
         name="get_programs",
         description=(
             "Récupère la liste des programmes d'entraînement disponibles (templates). "
@@ -206,42 +216,44 @@ def get_programs_tool() -> FunctionTool:
     )
 
 
-def get_save_fitness_goal_assessment_tool() -> FunctionTool:
+def get_save_fitness_goal_assessment_tool() -> StructuredTool:
     """Factory to create the save_fitness_goal_assessment tool."""
-    return FunctionTool.from_defaults(
-        fn=save_fitness_goal_assessment,
+    return StructuredTool.from_function(
+        func=save_fitness_goal_assessment,
         name="save_fitness_goal_assessment",
         description=(
             "Sauvegarde le résumé complet de l'évaluation des objectifs fitness dans Mem0 pour mémoire à long terme. "
             "Cet outil doit être appelé à la FIN du workflow d'évaluation des objectifs, une seule fois, "
             "après avoir collecté toutes les informations nécessaires (objectif principal, réponses aux questions "
-            "spécifiques, préférences utilisateur, disponibilités, contraintes). Le user_id est fourni automatiquement "
-            "par le système. Paramètres requis: fitness_goal_summary (résumé textuel complet de l'évaluation)."
+            "spécifiques, préférences utilisateur, disponibilités, contraintes). "
+            "Paramètre requis: fitness_goal_summary (résumé textuel complet de l'évaluation). "
+            "Note: user_id est géré automatiquement par le serveur, ne pas le fournir."
         )
     )
 
 
-def get_create_training_program_tool() -> FunctionTool:
+def get_create_training_program_tool() -> StructuredTool:
     """Factory to create the create_training_program tool."""
-    return FunctionTool.from_defaults(
-        fn=create_training_program,
+    return StructuredTool.from_function(
+        func=create_training_program,
         name="create_training_program",
         description=(
             "Crée un programme d'entraînement personnalisé basé sur l'IA en sélectionnant des exercices "
             "appropriés selon les paramètres de l'utilisateur: objectif, niveau, fréquence d'entraînement, "
             "équipements disponibles, et zone cible (optionnelle). Le programme est automatiquement sauvegardé "
-            "dans la base de données. Le user_id est fourni automatiquement par le système. "
+            "dans la base de données. "
             "Paramètres requis: goal (RESTER EN FORME ou REDESSINER SA SILHOUETTE), "
             "level (beginner/intermediate/advanced), training_frequency (3/4/5), available_equipments (liste), "
-            "et zone_target optionnel (HAUT DU CORPS/BAS DU CORPS/CEINTURE ABDOMINALE/CORPS COMPLET)."
+            "et zone_target optionnel (HAUT DU CORPS/BAS DU CORPS/CEINTURE ABDOMINALE/CORPS COMPLET). "
+            "Note: user_id est géré automatiquement par le serveur, ne pas le fournir."
         )
     )
 
-def get_all_training_tools() -> List[FunctionTool]:
+def get_all_training_tools() -> List[StructuredTool]:
     """Get all training tools as a list.
 
     Returns:
-        List of all training-related FunctionTool instances
+        List of all training-related StructuredTool instances
     """
     return [
         # get_programs_tool(),  # Removed - not needed for AI-generated programs
