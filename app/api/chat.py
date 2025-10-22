@@ -397,9 +397,14 @@ def _collect_memory_lines(memory: Any) -> List[str]:
     lines: List[str] = []
 
     if isinstance(memory, dict):
+        meta = memory.get("metadata") or {}
+        mem_ts = meta.get("timestamp_iso") or meta.get("timestamp")
         summary = (memory.get("summary_short") or "").strip()
         if summary:
-            lines.append(summary)
+            if mem_ts:
+                lines.append(f"{summary} (noté: {mem_ts})")
+            else:
+                lines.append(summary)
 
         facts = memory.get("facts") or []
         for fact in facts:
@@ -408,14 +413,27 @@ def _collect_memory_lines(memory: Any) -> List[str]:
             attribute = fact.get("attribute")
             value = fact.get("value")
             description = fact.get("description") or fact.get("summary")
+            fact_ts = fact.get("last_seen") or mem_ts
             if attribute and value:
-                lines.append(f"{attribute}: {value}")
+                if fact_ts:
+                    lines.append(f"{attribute}: {value} (maj: {fact_ts})")
+                else:
+                    lines.append(f"{attribute}: {value}")
             elif value:
-                lines.append(str(value))
+                if fact_ts:
+                    lines.append(f"{value} (maj: {fact_ts})")
+                else:
+                    lines.append(str(value))
             elif attribute:
-                lines.append(str(attribute))
+                if fact_ts:
+                    lines.append(f"{attribute} (maj: {fact_ts})")
+                else:
+                    lines.append(str(attribute))
             elif description:
-                lines.append(str(description))
+                if fact_ts:
+                    lines.append(f"{description} (maj: {fact_ts})")
+                else:
+                    lines.append(str(description))
 
         if not lines:
             fallback = memory.get("memory") or memory.get("content") or memory.get("text")
@@ -423,7 +441,10 @@ def _collect_memory_lines(memory: Any) -> List[str]:
                 for chunk in str(fallback).split("\n"):
                     trimmed = chunk.strip()
                     if trimmed:
-                        lines.append(trimmed)
+                        if mem_ts:
+                            lines.append(f"{trimmed} (noté: {mem_ts})")
+                        else:
+                            lines.append(trimmed)
 
         return lines
 

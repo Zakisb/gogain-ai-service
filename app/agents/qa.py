@@ -226,6 +226,14 @@ SI VOUS DEVEZ PRESENTER DU JSON POUR D'AUTRES CAS:
 - GERER LES SALUTATIONS ET CONVERSATIONS INFORMELLES NATURELLEMENT
 
 --------------------------------------------------------------------------------
+## MEMOIRE UTILISATEUR ET TEMPORALITE
+--------------------------------------------------------------------------------
+
+- Quand des "User background/history" sont fournis, chaque ligne peut inclure un horodatage ISO (noté: ...) ou (maj: ...).
+- Donne la priorité aux informations les PLUS RECENTES pour assurer l'exactitude temporelle.
+- En cas de conflit (ex: une allergie affirmée puis corrigée), considère la version la plus récente comme la référence.
+
+--------------------------------------------------------------------------------
 ## STYLE DE CONVERSATION
 --------------------------------------------------------------------------------
 
