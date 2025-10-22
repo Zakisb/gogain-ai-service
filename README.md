@@ -206,7 +206,7 @@ The "autre" (other) option allows users to provide custom text responses when th
 
 Default model is configured in `app/core/config.py`. Supported models:
 
-- **OpenAI**: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o-mini`
+- **OpenAI**: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o`
 - **Google**: `gemini/gemini-pro`, `gemini/gemini-2.0-flash` (NOT COMPATIBLE WITH LLAMA_INDEX BUT WILL BE AN OPTION WHEN WE SWITCH TO LANGCHAIN)
 
 ### Vector Database
@@ -250,7 +250,6 @@ Once the service is running, visit http://localhost:8000/docs for interactive AP
 - Add diet agent (easy)
 - Health insights (not enough data yet)
 - Tell the frontend to ping the backend once user opens the app, to populate redis with user data from database/memory and make the response time shorter
-
 
 
 
