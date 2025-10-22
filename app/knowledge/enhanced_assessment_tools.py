@@ -78,7 +78,20 @@ def store_mem0_context(user_id: str, body_region: str, context: Dict[str, Any], 
             json.dumps(context, ensure_ascii=False)
         )
 
-        logger.info(f"✅ [Mem0] Stored memory context for user={user_id} region={body_region}")
+        # Compute a simple total count for logging (expecting dict of list values)
+        try:
+            total_items = 0
+            if isinstance(context, dict):
+                for v in context.values():
+                    if isinstance(v, (list, tuple, set)):
+                        total_items += len(v)
+            logger.info(
+                f"✅ [Mem0] Cached memory context ({total_items} items) in Redis for user={user_id} region={body_region}"
+            )
+        except Exception:
+            logger.info(
+                f"✅ [Mem0] Cached memory context in Redis for user={user_id} region={body_region}"
+            )
 
     except Exception as exc:
         logger.error(f"❌ [Mem0] Failed to store context for user={user_id}: {exc}")
@@ -1650,7 +1663,7 @@ def launch_mem0_retrieval(user_id: str, body_region: str, initial_message: str) 
 
             total_memories = sum(len(v) for v in categorized_context.values())
             logger.info(
-                f"✅ [Mem0] Stored {total_memories} categorized memories for user={user_id} region={body_region}"
+                f"✅ [Mem0] Cached memory context ({total_memories} items) in Redis for user={user_id} region={body_region}"
             )
 
             print(f"🧠 Mem0 retrieval complete: {total_memories} memories stored in Redis")

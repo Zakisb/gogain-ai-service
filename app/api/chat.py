@@ -391,6 +391,49 @@ def _format_training_program_context(summary: Dict[str, Any]) -> Optional[str]:
     return "\n".join(lines)
 
 
+def _collect_memory_lines(memory: Any) -> List[str]:
+    """Return a list of concise lines describing a memory with summaries and facts."""
+
+    lines: List[str] = []
+
+    if isinstance(memory, dict):
+        summary = (memory.get("summary_short") or "").strip()
+        if summary:
+            lines.append(summary)
+
+        facts = memory.get("facts") or []
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            attribute = fact.get("attribute")
+            value = fact.get("value")
+            description = fact.get("description") or fact.get("summary")
+            if attribute and value:
+                lines.append(f"{attribute}: {value}")
+            elif value:
+                lines.append(str(value))
+            elif attribute:
+                lines.append(str(attribute))
+            elif description:
+                lines.append(str(description))
+
+        if not lines:
+            fallback = memory.get("memory") or memory.get("content") or memory.get("text")
+            if fallback:
+                for chunk in str(fallback).split("\n"):
+                    trimmed = chunk.strip()
+                    if trimmed:
+                        lines.append(trimmed)
+
+        return lines
+
+    if isinstance(memory, str):
+        text = memory.strip()
+        return [text] if text else []
+
+    return []
+
+
 def build_message_array_context(
     history,
     current_message,
@@ -417,10 +460,13 @@ def build_message_array_context(
     if include_memories and user_memories:
         memory_lines = []
         for memory in user_memories:
-            if isinstance(memory, dict) and 'memory' in memory:
-                memory_lines.append(f"- {memory['memory']}")
-            elif isinstance(memory, str):
-                memory_lines.append(f"- {memory}")
+            lines = _collect_memory_lines(memory)
+            if not lines:
+                continue
+            primary, *detail_lines = lines
+            memory_lines.append(f"- {primary}")
+            for detail in detail_lines:
+                memory_lines.append(f"  • {detail}")
 
         if memory_lines:
             system_context = f"User background/history:\n" + "\n".join(memory_lines)
@@ -433,12 +479,13 @@ def build_message_array_context(
     if message_based_memories:
         contextual_memory_lines = []
         for memory in message_based_memories:
-            if isinstance(memory, dict):
-                mem_text = memory.get('memory') or memory.get('content') or memory.get('text', '')
-                if mem_text:
-                    contextual_memory_lines.append(f"- {mem_text}")
-            elif isinstance(memory, str):
-                contextual_memory_lines.append(f"- {memory}")
+            lines = _collect_memory_lines(memory)
+            if not lines:
+                continue
+            first, *rest = lines
+            contextual_memory_lines.append(f"- {first}")
+            for detail in rest:
+                contextual_memory_lines.append(f"  • {detail}")
 
         if contextual_memory_lines:
             contextual_context = f"Relevant memories for current topic:\n" + "\n".join(contextual_memory_lines)
@@ -496,10 +543,13 @@ async def build_pain_agent_context(user_id: str, current_message: str, body_regi
     if include_memories and user_memories:
         memory_lines = []
         for memory in user_memories:
-            if isinstance(memory, dict) and 'memory' in memory:
-                memory_lines.append(f"- {memory['memory']}")
-            elif isinstance(memory, str):
-                memory_lines.append(f"- {memory}")
+            lines = _collect_memory_lines(memory)
+            if not lines:
+                continue
+            primary, *detail_lines = lines
+            memory_lines.append(f"- {primary}")
+            for detail in detail_lines:
+                memory_lines.append(f"  • {detail}")
 
         if memory_lines:
             system_context = f"User background/history:\n" + "\n".join(memory_lines)

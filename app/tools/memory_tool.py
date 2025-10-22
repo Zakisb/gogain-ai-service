@@ -15,6 +15,39 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _summarize_memory(memory: Dict[str, Any]) -> str:
+    """Build a concise textual summary from Mem0 memory data."""
+
+    lines: List[str] = []
+
+    summary = (memory.get("summary_short") or "").strip()
+    if summary:
+        lines.append(summary)
+
+    facts = memory.get("facts") or []
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        attribute = fact.get("attribute")
+        value = fact.get("value")
+        description = fact.get("description") or fact.get("summary")
+        if attribute and value:
+            lines.append(f"{attribute}: {value}")
+        elif value:
+            lines.append(str(value))
+        elif attribute:
+            lines.append(str(attribute))
+        elif description:
+            lines.append(str(description))
+
+    if not lines:
+        fallback = memory.get("memory") or memory.get("text") or memory.get("content")
+        if fallback:
+            lines.append(str(fallback))
+
+    return "\n".join(lines)
+
+
 def search_user_memories(query: str, limit: int = 5, user_id: Optional[str] = None) -> str:
     """Search user's stored memories/information using semantic search.
 
@@ -65,8 +98,7 @@ def search_user_memories(query: str, limit: int = 5, user_id: Optional[str] = No
         formatted_memories = []
         for idx, memory in enumerate(memories, 1):
             if isinstance(memory, dict):
-                # Extract memory text
-                memory_text = memory.get("memory", memory.get("text", ""))
+                memory_text = _summarize_memory(memory)
                 if memory_text:
                     formatted_memories.append(f"{idx}. {memory_text}")
 
