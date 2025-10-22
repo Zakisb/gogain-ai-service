@@ -21,7 +21,7 @@ Env (.env):
   QDRANT_URL=http://localhost:6333
   QDRANT_API_KEY=...
   RAG_ENRICH_LLM=1            # default ON for workflow nodes
-  RAG_ENRICH_MODEL=gpt-4o-mini
+  RAG_ENRICH_MODEL=gpt-4o
 """
 
 import os, re, uuid, time, argparse
@@ -56,7 +56,7 @@ CHUNK_OVERLAP = 220  # chars
 
 # LLM enrichment defaults ON for workflow nodes (can disable via env)
 USE_LLM_ENRICH = os.getenv("RAG_ENRICH_LLM", "1") == "1"
-LLM_MODEL = os.getenv("RAG_ENRICH_MODEL", "gpt-4o-mini")
+LLM_MODEL = os.getenv("RAG_ENRICH_MODEL", "gpt-4o")
 
 REGION_FR_NOUN = {
     "knee": "genou",

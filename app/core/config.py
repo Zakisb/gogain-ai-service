@@ -24,9 +24,9 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
 # --- LlamaIndex / OpenAI Settings ---
 # Default model to use if not specified elsewhere
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-3.5-turbo")
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", os.getenv("DEFAULT_ROUTER_MODEL", "gpt-4o-mini"))
-PAIN_AGENT_MODEL = os.getenv("PAIN_AGENT_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-4o")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", os.getenv("DEFAULT_ROUTER_MODEL", "gpt-4o"))
+PAIN_AGENT_MODEL = os.getenv("PAIN_AGENT_MODEL", "gpt-4o")
 
 # --- Thread Manager Settings ---
 # Override thread manager provider (optional)

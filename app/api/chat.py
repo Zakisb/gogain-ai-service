@@ -701,6 +701,57 @@ class VirtualCoachChatRequest(BaseModel):
     conversationHistory: List[Dict[str, Any]] = []
 
 
+class PrefetchUserContextRequest(BaseModel):
+    userId: Union[str, int]
+
+
+@router.post("/prefetch-user-context")
+async def prefetch_user_context(request: PrefetchUserContextRequest) -> Dict[str, Any]:
+    """Warm Redis caches for a user so the first chat turn stays fast."""
+
+    user_id = str(request.userId)
+    start_ts = time.perf_counter()
+
+    profile_task = asyncio.create_task(get_or_fetch_user_profile(user_id))
+    memories_task = asyncio.create_task(get_or_fetch_user_memories(user_id, limit=20))
+    training_task = asyncio.create_task(get_or_fetch_user_training_program(user_id))
+
+    profile, memories, training = await asyncio.gather(
+        profile_task,
+        memories_task,
+        training_task,
+        return_exceptions=True,
+    )
+
+    if isinstance(profile, Exception):
+        logger.warning(f"⚠️ Prefetch profile failed for {user_id}: {profile}")
+        profile = {}
+    if isinstance(memories, Exception):
+        logger.warning(f"⚠️ Prefetch memories failed for {user_id}: {memories}")
+        memories = []
+    if isinstance(training, Exception):
+        logger.warning(f"⚠️ Prefetch training program failed for {user_id}: {training}")
+        training = {}
+
+    elapsed_ms = (time.perf_counter() - start_ts) * 1000
+    logger.info(
+        "🚀 Prefetched context for user %s in %.2fms (profile=%s memories=%d training=%s)",
+        user_id,
+        elapsed_ms,
+        bool(profile),
+        len(memories) if isinstance(memories, list) else 0,
+        training.get("hasProgram") if isinstance(training, dict) else False,
+    )
+
+    return {
+        "status": "ok",
+        "duration_ms": round(elapsed_ms, 2),
+        "profile_cached": bool(profile),
+        "memories_cached": len(memories) if isinstance(memories, list) else 0,
+        "training_cached": bool(training.get("hasProgram")) if isinstance(training, dict) else False,
+    }
+
+
 def emit_vc_event(event_type: str, content: Any) -> str:
     """Emit a Node-compatible SSE frame with proper newlines for immediate transmission.
 
@@ -822,10 +873,32 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             logger.info(f"🎯 Active agent for user {user_id}: {active_agent_type}")
 
             try:
-                user_profile = await get_or_fetch_user_profile(user_id)
-                user_memories = await get_or_fetch_user_memories(user_id, limit=20)
-                training_program_summary = await get_or_fetch_user_training_program(user_id)
-                training_snapshot = training_program_summary.get("snapshot")
+                profile_task = asyncio.create_task(get_or_fetch_user_profile(user_id))
+                memories_task = asyncio.create_task(get_or_fetch_user_memories(user_id, limit=20))
+                training_task = asyncio.create_task(get_or_fetch_user_training_program(user_id))
+
+                user_profile, user_memories, training_program_summary = await asyncio.gather(
+                    profile_task,
+                    memories_task,
+                    training_task,
+                    return_exceptions=True,
+                )
+
+                if isinstance(user_profile, Exception):
+                    logger.warning(f"⚠️ Prefetch user profile failed inline for {user_id}: {user_profile}")
+                    user_profile = {}
+                if isinstance(user_memories, Exception):
+                    logger.warning(f"⚠️ Prefetch memories failed inline for {user_id}: {user_memories}")
+                    user_memories = []
+                if isinstance(training_program_summary, Exception):
+                    logger.warning(f"⚠️ Prefetch training program failed inline for {user_id}: {training_program_summary}")
+                    training_program_summary = {}
+
+                training_snapshot = (
+                    training_program_summary.get("snapshot")
+                    if isinstance(training_program_summary, dict)
+                    else None
+                )
 
                 # Search Mem0 using current user message for contextual memory retrieval
                 # This block can be disabled by setting ENABLE_MEM0_MESSAGE_RETRIEVAL=false in .env

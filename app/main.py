@@ -13,6 +13,7 @@ from app.api.chat import (
 from app.core.redis_client import get_redis   # Redis client for caches
 from app.core.prisma_client import ensure_client_connected
 from app.core.database import execute_query, close_pool
+from app.core.memory import get_mem0_client
 
 
 @asynccontextmanager
@@ -34,6 +35,15 @@ async def lifespan(app: FastAPI):
         print("✅ Agent manager initialised successfully")
     except Exception as e:
         print(f"⚠️ Agent warmup failed (will build on first request): {e}")
+
+    # Startup: Warm Mem0 client to avoid first-request penalty
+    try:
+        if get_mem0_client():
+            print("✅ Mem0 client warmed successfully")
+        else:
+            print("ℹ️ Mem0 client not configured (MEM0_API_KEY missing)")
+    except Exception as e:
+        print(f"⚠️ Mem0 warmup failed (will initialize lazily): {e}")
 
     # Startup: Ensure Prisma client is ready and database reachable
     try:

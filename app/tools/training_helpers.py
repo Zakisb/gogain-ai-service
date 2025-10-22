@@ -249,7 +249,7 @@ def select_exercises_with_ai(
         # Call OpenAI
         logger.info(f"Calling OpenAI for exercise selection (level={level}, frequency={training_frequency})")
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.7,
