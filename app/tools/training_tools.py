@@ -48,7 +48,8 @@ def get_programs() -> str:
 
 
 def save_fitness_goal_assessment(
-    fitness_goal_summary: str
+    user_id: str,
+    fitness_goal_summary: str,
 ) -> str:
     """Save fitness goal assessment summary to Mem0 for long-term memory.
 
@@ -56,6 +57,7 @@ def save_fitness_goal_assessment(
     the complete assessment including user goals, preferences, and constraints.
 
     Args:
+        user_id: Numeric user identifier provided by API layer
         fitness_goal_summary: Complete summary of fitness goal assessment including:
                              - Primary fitness goal
                              - All answers to goal-specific questions
@@ -69,13 +71,8 @@ def save_fitness_goal_assessment(
         user_id is retrieved from server context (set by API layer), NOT from AI.
     """
     try:
-        # Get user_id from context (set by API layer via set_user_context, NOT from AI)
-        from app.knowledge.enhanced_assessment_tools import get_user_context
-        user_id = get_user_context()
-
-        # Fail fast if user_id not set by server
         if not user_id or user_id == "unknown_user":
-            logger.error("save_fitness_goal_assessment called without valid user_id in context")
+            logger.error("save_fitness_goal_assessment called without valid user_id")
             return "Impossible d'identifier l'utilisateur pour sauvegarder l'évaluation."
 
         # Get Mem0 client
@@ -111,6 +108,7 @@ def save_fitness_goal_assessment(
 
 
 def create_training_program(
+    user_id: str,
     goal: str,
     level: str,
     training_frequency: int,
@@ -123,6 +121,7 @@ def create_training_program(
     and creates a customized training program stored in the database.
 
     Args:
+        user_id: Numeric user identifier provided by API layer
         goal: Fitness goal - must be one of: "RESTER EN FORME", "REDESSINER SA SILHOUETTE"
         level: Fitness level - must be one of: "beginner", "intermediate", "advanced"
         training_frequency: Number of training days per week (3, 4, or 5)
@@ -137,13 +136,8 @@ def create_training_program(
         user_id is retrieved from server context (set by API layer), NOT from AI.
     """
     try:
-        # Get user_id from context (set by API layer via set_user_context, NOT from AI)
-        from app.knowledge.enhanced_assessment_tools import get_user_context
-        user_id = get_user_context()
-
-        # Fail fast if user_id not set by server
         if not user_id or user_id == "unknown_user":
-            logger.error("create_training_program called without valid user_id in context")
+            logger.error("create_training_program called without valid user_id")
             return "Impossible d'identifier l'utilisateur pour créer le programme."
         # Validate inputs
         valid_goals = ["RESTER EN FORME", "REDESSINER SA SILHOUETTE"]
@@ -216,10 +210,19 @@ def get_programs_tool() -> StructuredTool:
     )
 
 
-def get_save_fitness_goal_assessment_tool() -> StructuredTool:
-    """Factory to create the save_fitness_goal_assessment tool."""
+def get_save_fitness_goal_assessment_tool(user_id: str) -> StructuredTool:
+    """Factory to create the save_fitness_goal_assessment tool for a specific user."""
+
+    def _tool(fitness_goal_summary: str) -> str:
+        return save_fitness_goal_assessment(
+            user_id=user_id,
+            fitness_goal_summary=fitness_goal_summary,
+        )
+
+    _tool.__name__ = "save_fitness_goal_assessment"  # For cleaner logging
+
     return StructuredTool.from_function(
-        func=save_fitness_goal_assessment,
+        func=_tool,
         name="save_fitness_goal_assessment",
         description=(
             "Sauvegarde le résumé complet de l'évaluation des objectifs fitness dans Mem0 pour mémoire à long terme. "
@@ -228,14 +231,33 @@ def get_save_fitness_goal_assessment_tool() -> StructuredTool:
             "spécifiques, préférences utilisateur, disponibilités, contraintes). "
             "Paramètre requis: fitness_goal_summary (résumé textuel complet de l'évaluation). "
             "Note: user_id est géré automatiquement par le serveur, ne pas le fournir."
-        )
+        ),
     )
 
 
-def get_create_training_program_tool() -> StructuredTool:
-    """Factory to create the create_training_program tool."""
+def get_create_training_program_tool(user_id: str) -> StructuredTool:
+    """Factory to create the create_training_program tool for a specific user."""
+
+    def _tool(
+        goal: str,
+        level: str,
+        training_frequency: int,
+        available_equipments: List[str],
+        zone_target: str = None,
+    ) -> str:
+        return create_training_program(
+            user_id=user_id,
+            goal=goal,
+            level=level,
+            training_frequency=training_frequency,
+            available_equipments=available_equipments,
+            zone_target=zone_target,
+        )
+
+    _tool.__name__ = "create_training_program"
+
     return StructuredTool.from_function(
-        func=create_training_program,
+        func=_tool,
         name="create_training_program",
         description=(
             "Crée un programme d'entraînement personnalisé basé sur l'IA en sélectionnant des exercices "
@@ -246,17 +268,17 @@ def get_create_training_program_tool() -> StructuredTool:
             "level (beginner/intermediate/advanced), training_frequency (3/4/5), available_equipments (liste), "
             "et zone_target optionnel (HAUT DU CORPS/BAS DU CORPS/CEINTURE ABDOMINALE/CORPS COMPLET). "
             "Note: user_id est géré automatiquement par le serveur, ne pas le fournir."
-        )
+        ),
     )
 
-def get_all_training_tools() -> List[StructuredTool]:
-    """Get all training tools as a list.
+def get_all_training_tools(user_id: str) -> List[StructuredTool]:
+    """Get all training tools as a list for the provided user.
 
     Returns:
         List of all training-related StructuredTool instances
     """
     return [
         # get_programs_tool(),  # Removed - not needed for AI-generated programs
-        get_save_fitness_goal_assessment_tool(),
-        get_create_training_program_tool(),
+        get_save_fitness_goal_assessment_tool(user_id),
+        get_create_training_program_tool(user_id),
     ]

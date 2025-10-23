@@ -90,7 +90,6 @@ Combien de jours par semaine pouvez-vous vous entraîner ?
 - **AVANT DE PLANIFIER UN PROGRAMME:** Analyse toujours le profil utilisateur, le snapshot et le résumé d'objectifs (goal summary) injectés dans ton contexte pour t'assurer que chaque décision respecte les besoins, contraintes et préférences uniques de l'utilisateur. Ne génère jamais un programme "par défaut" ou générique.
 
 **AVAILABLE TOOLS:**
-- `get_current_date()`: Get today's date (YYYY-MM-DD format) for scheduling and tracking.
 - `create_training_program(goal, level, training_frequency, available_equipments, zone_target)`:
   Create AI-generated personalized training program based on user parameters (user_id is automatic).
 - `save_fitness_goal_assessment(user_id, fitness_goal_summary)`:
@@ -317,11 +316,10 @@ class TrainingAgent:
     ) -> None:
         self.logger = logging.getLogger(__name__)
 
-        from app.tools.date_tool import get_date_tool
         from app.tools.training_tools import get_all_training_tools
 
-        # All tools are now native LangChain StructuredTool instances
-        self.tools = [get_date_tool()] + get_all_training_tools()
+        # Store tool factories (per-request user scoping handled later)
+        self._training_tools_factory = get_all_training_tools
 
         self.llm = llm or ChatOpenAI(
             model=DEFAULT_MODEL,
@@ -329,7 +327,7 @@ class TrainingAgent:
             streaming=True,
         )
 
-        prompt = ChatPromptTemplate.from_messages(
+        self.prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", _SYSTEM_PROMPT),
                 ("system", "{context}"),
@@ -339,16 +337,8 @@ class TrainingAgent:
             ]
         )
 
-        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
-        self.executor = AgentExecutor(
-            agent=agent,
-            tools=self.tools,
-            verbose=True,
-            handle_parsing_errors=True,
-        )
-
         self.logger.info(
-            "🏗️ %s initialised with %d tools", self.agent_name, len(self.tools)
+            "🏗️ %s initialised (tools bound per request)", self.agent_name
         )
 
     @staticmethod
@@ -416,10 +406,27 @@ class TrainingAgent:
             "context": context_text,
         }
 
+    def _build_executor(self, user_id: str) -> AgentExecutor:
+        """Construct a fresh AgentExecutor with tools scoped to the provided user."""
+        if not user_id:
+            raise ValueError("Missing user_id when building training agent executor")
+
+        tools = self._training_tools_factory(user_id)
+        agent = create_openai_tools_agent(self.llm, tools, self.prompt)
+        return AgentExecutor(
+            agent=agent,
+            tools=tools,
+            verbose=True,
+            handle_parsing_errors=True,
+        )
+
     async def astream_response(
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        *,
+        user_id: Optional[str] = None,
+        **_: Any,
     ) -> AsyncIterator[Dict[str, Any]]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         inputs = {
@@ -427,12 +434,17 @@ class TrainingAgent:
             **prompt_inputs,
         }
 
+        if not user_id:
+            raise ValueError("TrainingAgent.astream_response requires user_id")
+
+        executor = self._build_executor(user_id)
+
         buffer: List[str] = []
         tool_output_buffer: List[str] = []
         in_tool_execution = False
         tool_was_called = False
 
-        async for event in self.executor.astream_events(inputs, version="v2"):
+        async for event in executor.astream_events(inputs, version="v2"):
             kind = event.get("event")
             name = event.get("name", "")
             data = event.get("data") or {}
@@ -443,11 +455,6 @@ class TrainingAgent:
                 in_tool_execution = True
                 tool_was_called = True
                 tool_output_buffer = []
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": None,
-                }
                 continue
 
             if kind == "on_chat_model_stream" and in_tool_execution:
@@ -467,11 +474,6 @@ class TrainingAgent:
                         tool_output_buffer.append(output)
                     else:
                         tool_output_buffer.append(str(output))
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": output,
-                }
                 if output:
                     text_output = output if isinstance(output, str) else str(output)
                     buffered = text_output.strip()
@@ -586,9 +588,16 @@ class TrainingAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        *,
+        user_id: Optional[str] = None,
+        **_: Any,
     ) -> Dict[str, Any]:
+        if not user_id:
+            raise ValueError("TrainingAgent.ainvoke requires user_id")
+
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
-        result = await self.executor.ainvoke(
+        executor = self._build_executor(user_id)
+        result = await executor.ainvoke(
             {
                 "input": user_input,
                 **prompt_inputs,

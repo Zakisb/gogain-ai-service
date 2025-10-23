@@ -1,10 +1,11 @@
 """Enhanced AI-Powered PainAssessmentAgent definition.
 
-Uses advanced RAG system with memory integration and clinical reasoning to conduct 
-intelligent pain assessments. Generates contextual questions dynamically based on 
+Uses advanced RAG system with memory integration and clinical reasoning to conduct
+intelligent pain assessments. Generates contextual questions dynamically based on
 medical knowledge and user history instead of hardcoded question templates.
 """
 
+import json
 import logging
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
@@ -193,6 +194,14 @@ Après avoir appelé l'outil generate_adaptive_pain_summary, réponds DIRECTEMEN
 - Mentionne quand consulter si nécessaire
 - Sois empathique, clair et actionnable
 
+⚠️ RÈGLE DE CLÔTURE AVEC RAG (anti‑conclusion prématurée)
+- Après le PREMIER appel à `retrieve_with_llm_queries(...)`, tu NE DOIS PAS conclure tant que tu n’as pas posé AU MOINS 2–3 questions issues des suggestions RAG ("QUESTIONS SUGGÉRÉES" présentes dans le contexte),
+  sauf si:
+  - un RED FLAG fort est identifié nécessitant une action immédiate, ou
+  - tu disposes d’un niveau de certitude ÉLEVÉ et justifiable quant à une cause unique (expliquer brièvement la justification clinique).
+- Considère une question comme « RAG‑informée » si elle provient explicitement de la liste "QUESTIONS SUGGÉRÉES" (tu peux la reformuler pour l’adapter au contexte).
+- Cette règle garantit que tu exploites effectivement le contenu RAG avant la conclusion.
+
 **COMPORTEMENT D'ENTRETIEN IMPORTANT:**
 - UNE SEULE question par message, sans politesse superflue.
 - N'écris JAMAIS des phrases du type « Merci pour votre réponse », « D'accord », « Pour comprendre plus », etc.
@@ -201,20 +210,17 @@ Après avoir appelé l'outil generate_adaptive_pain_summary, réponds DIRECTEMEN
 
 **OUTILS DISPONIBLES:**
 
-1. `get_current_date()`: Appelez cet outil chaque fois que vous avez besoin de la date actuelle (format YYYY-MM-DD).
-   Utilisez-le pour dater l'évaluation, calculer la durée de la douleur, ou tout contexte temporel.
-
-2. `generate_adaptive_pain_summary(body_region, conversation_summary, clinical_insights)`: Génère le résumé final
+1. `generate_adaptive_pain_summary(body_region, conversation_summary, clinical_insights)`: Génère le résumé final
    - Appelle cet outil quand tu as assez d'informations (cause/source + prévention identifiées)
    - Après l'appel, envoie ta conclusion en JSON (response_type: "conclusion")
 
-3. `retrieve_with_llm_queries(body_region, conversation_history, rag_queries?, hyde_snippet?)`:
+2. `retrieve_with_llm_queries(body_region, conversation_history, rag_queries?, hyde_snippet?)`:
    - Déclenche un rafraîchissement RAG **entièrement en arrière-plan** (non bloquant)
    - La fonction retourne immédiatement un statut — continue de parler sans attendre
    - Dès que le rafraîchissement est terminé, de nouvelles suggestions apparaissent dans `AVAILABLE_QUESTIONS`
    - Utilise-le après avoir confirmé le mécanisme initial puis à chaque nouvelle information clé pour garder ta queue à jour
 
-4. `exit_pain_assessment(body_region)`: Termine immédiatement l'évaluation douleur en cours
+3. `exit_pain_assessment(body_region)`: Termine immédiatement l'évaluation douleur en cours
    - Vide la queue Redis et remet le routage central en contrôle
    - À utiliser dès que l'utilisateur change clairement de sujet ou souhaite passer à un autre type d'accompagnement
 
@@ -313,6 +319,8 @@ Si tu vois "QUESTIONS SUGGÉRÉES:" dans ton contexte:
      * PRIORITÉ TECHNIQUE: Si exercice spécifique mentionné → questions sur technique/charge AVANT intensité
    - **VÉRIFIE** l'historique pour éviter doublons
    - **FORMATE** dans ton JSON avec options appropriées
+   - **COMPTE** le nombre de questions posées provenant de "QUESTIONS SUGGÉRÉES" (RAG‑informées).
+     - Objectif: poser au moins 2–3 questions RAG‑informées AVANT toute conclusion (sauf red flag fort ou certitude clinique élevée, cf. règle de clôture).
    - **Si aucune suggestion pertinente:** génère ta propre question
 
 4. **UTILISATION DU RAG (une seule section, sans répétitions):**
@@ -620,6 +628,7 @@ class PainAssessmentAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> AsyncIterator[Dict[str, Any]]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         inputs = {
@@ -628,9 +637,9 @@ class PainAssessmentAgent:
         }
 
         buffer: List[str] = []
-        tool_output_buffer: List[str] = []
         in_tool_execution = False
-        tool_was_called = False
+        last_tool_output: Any = None
+        current_tool_name: Optional[str] = None
 
         async for event in self.executor.astream_events(inputs, version="v2"):
             kind = event.get("event")
@@ -644,46 +653,33 @@ class PainAssessmentAgent:
             )
 
             if kind == "on_tool_start":
-                tool_name = name or data.get("name", "unknown_tool")
-                self.logger.info(f"🔧 Pain agent tool called: {tool_name}")
+                current_tool_name = name or data.get("name", "unknown_tool")
+                self.logger.info(f"🔧 Pain agent tool called: {current_tool_name}")
                 in_tool_execution = True
-                tool_was_called = True
-                tool_output_buffer = []
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": None,
-                }
                 continue
 
             if kind == "on_chat_model_stream" and in_tool_execution:
                 chunk = data.get("chunk")
                 text = self._chunk_to_text(chunk)
-                if text:
-                    tool_output_buffer.append(text)
-                    yield {"type": "text", "content": text}
                 continue
 
             if kind == "on_tool_end":
                 in_tool_execution = False
                 output = data.get("output")
                 tool_name = name or getattr(data.get("tool"), "name", None)
-                if output:
+                self.logger.info(
+                    "🔧 Pain agent tool finished: %s", tool_name or current_tool_name
+                )
+                if output is not None:
+                    parsed_output: Any = output
                     if isinstance(output, str):
-                        tool_output_buffer.append(output)
-                    else:
-                        tool_output_buffer.append(str(output))
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": output,
-                }
-                if output:
-                    text_output = output if isinstance(output, str) else str(output)
-                    buffered = text_output.strip()
-                    if buffered:
-                        yield {"type": "text", "content": buffered}
-                        buffer.append(buffered)
+                        stripped = output.strip()
+                        if stripped:
+                            try:
+                                parsed_output = json.loads(stripped)
+                            except json.JSONDecodeError:
+                                parsed_output = stripped
+                    last_tool_output = parsed_output
                 continue
 
             # Stream LLM tokens when not in tool execution
@@ -714,20 +710,16 @@ class PainAssessmentAgent:
 
             if kind == "on_agent_finish":
                 output_payload = data.get("output")
-                final_text = ""
+                final_text = "".join(buffer).strip()
 
-                if tool_was_called:
-                    final_text = "".join(tool_output_buffer).strip()
-
-                if not final_text:
-                    if isinstance(output_payload, dict):
-                        final_text = (
-                            output_payload.get("output")
-                            or output_payload.get("final_output")
-                            or ""
-                        )
-                    else:
-                        final_text = str(output_payload) if output_payload else ""
+                if not final_text and isinstance(output_payload, dict):
+                    final_text = (
+                        output_payload.get("output")
+                        or output_payload.get("final_output")
+                        or ""
+                    )
+                elif not final_text and output_payload:
+                    final_text = str(output_payload)
 
                 if not final_text and isinstance(data, dict):
                     return_values = data.get("return_values", {})
@@ -738,8 +730,16 @@ class PainAssessmentAgent:
                             or final_text
                         )
 
-                if not final_text:
-                    final_text = "".join(buffer).strip()
+                if not final_text and isinstance(last_tool_output, dict):
+                    final_text = (
+                        last_tool_output.get("clinical_notes")
+                        or last_tool_output.get("assessment_notes")
+                        or last_tool_output.get("conversation_insights")
+                        or ""
+                    )
+
+                if not final_text and isinstance(last_tool_output, str):
+                    final_text = last_tool_output
 
                 if final_text and not buffer:
                     buffer.append(final_text)
@@ -755,23 +755,27 @@ class PainAssessmentAgent:
             # Only handle on_chain_end for the final AgentExecutor, not intermediate chains
             if kind == "on_chain_end" and name == "AgentExecutor":
                 output_payload = data.get("output")
-                final_text = ""
+                final_text = "".join(buffer).strip()
 
-                if tool_was_called:
-                    final_text = "".join(tool_output_buffer).strip()
+                if not final_text and isinstance(output_payload, dict):
+                    final_text = (
+                        output_payload.get("output")
+                        or output_payload.get("final_output")
+                        or ""
+                    )
+                elif not final_text and output_payload:
+                    final_text = str(output_payload)
 
-                if not final_text:
-                    if isinstance(output_payload, dict):
-                        final_text = (
-                            output_payload.get("output")
-                            or output_payload.get("final_output")
-                            or ""
-                        )
-                    else:
-                        final_text = str(output_payload) if output_payload else ""
+                if not final_text and isinstance(last_tool_output, dict):
+                    final_text = (
+                        last_tool_output.get("clinical_notes")
+                        or last_tool_output.get("assessment_notes")
+                        or last_tool_output.get("conversation_insights")
+                        or ""
+                    )
 
-                if not final_text:
-                    final_text = "".join(buffer).strip()
+                if not final_text and isinstance(last_tool_output, str):
+                    final_text = last_tool_output
 
                 if final_text and not buffer:
                     yield {"type": "text", "content": final_text}
@@ -791,6 +795,7 @@ class PainAssessmentAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> Dict[str, Any]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         result = await self.executor.ainvoke(

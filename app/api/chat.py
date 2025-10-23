@@ -1204,18 +1204,14 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
                 async for agent_event in handling_agent_obj.astream_response(
                     context_messages,
                     user_message,
+                    user_id=user_id,
                 ):
                     event_count += 1
                     event_type = agent_event.get("type")
                     logger.debug(f"📦 Event #{event_count}: {event_type}")
 
                     if event_type == "tool_result":
-                        tool_name = agent_event.get("tool_name") or "tool"
-                        tool_payload = {
-                            "function_name": tool_name,
-                            "status": "ok",
-                        }
-                        yield emit_vc_event("tool_result", tool_payload) + ""
+                        # Suppress tool notifications in user-facing stream
                         await asyncio.sleep(0)
                         continue
 
@@ -1251,7 +1247,11 @@ async def handle_virtual_coach_chat(request: VirtualCoachChatRequest) -> Streami
             if not final_response_content and handling_agent in ("TrainingAgent", "PainAssessmentAgent"):
                 logger.warning(f"⚠️ Streaming failed for {handling_agent}, falling back to ainvoke")
                 try:
-                    result = await handling_agent_obj.ainvoke(context_messages, user_message)
+                    result = await handling_agent_obj.ainvoke(
+                        context_messages,
+                        user_message,
+                        user_id=user_id,
+                    )
                     final_response_content = result.get("output") or result.get("final_output") or str(result)
                     logger.info(f"✅ Fallback ainvoke succeeded: {len(final_response_content)} chars")
                 except Exception as fallback_error:

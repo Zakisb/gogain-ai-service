@@ -22,12 +22,11 @@ GoGain AI Coach implements a multi-agent architecture with RAG (Retrieval-Augmen
 | Component | Technology |
 |-----------|-----------|
 | Framework | FastAPI |
-| AI Orchestration | LlamaIndex |
-| LLM Integration | LiteLLM (OpenAI, Anthropic, Google Gemini) |
+| AI Orchestration | langchain|
 | Vector Database | Qdrant (self-hosted) |
-| Embeddings | Voyage AI (primary), OpenAI (fallback) |
+| Embeddings | Voyage AI (RAG), OpenAI (memory) |
 | Memory | Mem0 for enhanced AI agent memory |
-| Containerization | Docker + Docker Compose |
+| Containerization | Docker |
 
 ## Prerequisites
 
@@ -144,12 +143,6 @@ gogain-ai-service-v1/
 └── minreqs.txt     # Python dependencies
 ```
 
-### Adding New Agents
-
-1. Create a new agent file in `app/agents/`
-2. Implement the agent following the existing pattern
-3. Register the agent in the central router
-4. Add corresponding API endpoints in `app/api/`
 
 ### Testing
 
@@ -163,8 +156,7 @@ python test_voyage_config.py
 # Interactive chat testing
 python coach.py
 
-#fetches all memories of a specific user (takes user_id as argument)
-python scripts/get_user_memories.py 
+
 
 # Analyze Qdrant collections
 python3 analyze_qdrant.py
@@ -172,6 +164,7 @@ MUST BE USED TO CHECK IF THE EMBEDDING RAN CORRECTLY , HAS TO BE CALLED FROM INS
 
 python3 connectivity_qdrant.py to check connectivity to qdrant
 python3 connectivity_postgres.py to check connectivity ti postgres
+python3 get_mems.py [user_id] ex : get_mems.py 54       to see all memories from a certain user
 ```
 
 ## Pain Assessment Workflow
@@ -206,25 +199,17 @@ The "autre" (other) option allows users to provide custom text responses when th
 
 Default model is configured in `app/core/config.py`. Supported models:
 
-- **OpenAI**: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o`
-- **Google**: `gemini/gemini-pro`, `gemini/gemini-2.0-flash` (NOT COMPATIBLE WITH LLAMA_INDEX BUT WILL BE AN OPTION WHEN WE SWITCH TO LANGCHAIN)
+- **OpenAI**:  `gpt-4o-mini`, `gpt-4o`
+- We use gpt4o for responses, and 4o-mini for llm based metadata enriching
 
 ### Vector Database
 
-The service uses self-hosted Qdrant. Index naming follows:
-```
-gogain-{knowledge_type}-{body_region}
-```
+The service uses self-hosted Qdrant
 
-Example: `gogain-pain-shoulder`
-
-
-
-```
 
 ### Performance Requirements
 
-- **Response Time**: Maximum 4 seconds per user interaction
+- **Response Time**: Maximum 3 seconds per user interaction
 - **RAG Preloading**: Fetch questions while user is interacting, not during wait time, Never run the RAG while user is waiting always start rag and dont wait for the response, it will populate the queue with pain questions.
 - **Question Queue**: When 10 questions are fetched and AI asks 4, trigger new RAG queries at question 3
 
@@ -244,12 +229,16 @@ Once the service is running, visit http://localhost:8000/docs for interactive AP
 
 ### Future improvements:
 
-- Currently the pain agent fetches questions but does not follow the workflow mentioned in the documents, its good enough but GPT4o is just not smart enough to know what questions are the most important, Solution:Either rephrase the prompt, if it doesnt work --> change the chunking technique + new prompt
 
-- Ditch llama_index and use langchain, will save router  costs and langchain is easier to work with.
 - Add diet agent (easy)
-- Health insights (not enough data yet)
-- Tell the frontend to ping the backend once user opens the app, to populate redis with user data from database/memory and make the response time shorter
+- Health insights (no data yet)
+- Tell the frontend to ping the backend once user opens the app, to populate redis with user data from database/memory and make the response time shorter (we already have an API endpoint in this backend that the frontend can ping to trigger fetching & caching)
+
+### Notes:
+- The user_id in mem0 is the same user_id we get via the API
+- The rag is always called in the background so it doesnt cause delays or ruin the user experience
+- fitness goals and pain assessments are stored in memory
+- the .env file has a  ENABLE_MEM0_MESSAGE_RETRIEVAL it enables search and retrieval from memory everytime the user sends a message, by default its set to false for performance but it can be set to TRUE if there is no major delays caused by it, (the advantage of it is when the conversations get long mem0 gets a lot of context so its a way to filter out what we retrieve rather than dumping all the memories into the agent's context.
 
 
 

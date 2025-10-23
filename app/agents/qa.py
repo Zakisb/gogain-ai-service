@@ -98,6 +98,9 @@ Salut Marie ! Comment puis-je t'aider aujourd'hui ?
 {{"id": "autre", "label": "Autre question ou besoin"}}
 ```
 
+- Si l'utilisateur choisit l'option `programme` (ou écrit explicitement "programme", "questions sur mon programme fitness", etc.) **et** que le message système "TRAINING PROGRAM SNAPSHOT" indique qu'un programme est actif, ne réaffiche pas le menu. Explique immédiatement le programme actif en utilisant le snapshot (résumé, séances, objectifs) et propose d'approfondir si besoin.
+- Si l'utilisateur demande `programme` mais qu'aucun programme n'est actif, réponds clairement qu'aucun programme n'est enregistré et propose de démarrer un nouvel accompagnement (par exemple en suggérant l'option fitness ou en sollicitant l'agent d'entraînement).
+
 **RÈGLES CRITIQUES:**
 - Ligne 1: la question "Salut [Prénom] ! Comment puis-je t'aider aujourd'hui ?" (sans backticks, toujours avec le prénom)
 - Ligne 2: ```json (exactement ces caractères)
@@ -143,11 +146,7 @@ ASSISTANT: Réponse conversationnelle détaillant le concept de NEAT (aucun JSON
 ## OUTILS DISPONIBLES
 --------------------------------------------------------------------------------
 
-**1. get_current_date**
-- APPELEZ CET OUTIL POUR LA DATE ACTUELLE AU FORMAT YYYY-MM-DD
-- UTILISEZ POUR TOUT CONTEXTE TEMPOREL: PLANIFICATION, SUIVI, COMPARAISON DE DATES
-
-**2. assess_pain** (Outil d'évaluation de la douleur)
+**1. assess_pain** (Outil d'évaluation de la douleur)
 - **UTILISEZ CET OUTIL quand l'utilisateur:**
   - Mentionne une douleur, blessure, gêne, inconfort, mal
   - Est en train de répondre à des questions sur sa douleur
@@ -161,7 +160,7 @@ ASSISTANT: Réponse conversationnelle détaillant le concept de NEAT (aucun JSON
   toute la conversation de douleur. Il posera ses propres questions et guidera l'évaluation.
 - **RETOURNE:** Les questions de l'agent de douleur ou l'évaluation finale
 
-**3. manage_training_program** (Outil de gestion de programme d'entraînement)
+**2. manage_training_program** (Outil de gestion de programme d'entraînement)
 - **UTILISEZ CET OUTIL SEULEMENT quand l'utilisateur:**
   - Veut CRÉER un NOUVEAU programme d'entraînement
   - Veut MODIFIER ou METTRE À JOUR son programme existant
@@ -307,11 +306,10 @@ class GeneralCoachAgent:
     ) -> None:
         self.logger = logger
 
-        from app.tools.date_tool import get_date_tool
         from langchain.tools.base import BaseTool
 
         # All tools are now native LangChain StructuredTool instances
-        self.tools = [get_date_tool()]
+        self.tools = []
 
         # Add additional tools (pain/training agent wrappers)
         if additional_tools:
@@ -431,6 +429,7 @@ class GeneralCoachAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> AsyncIterator[Dict[str, Any]]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         inputs = {
@@ -457,13 +456,6 @@ class GeneralCoachAgent:
                 in_tool_execution = True
                 tool_was_called = True
                 tool_output_buffer = []
-
-                # Emit tool_result event (frontend can show loading)
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": None,
-                }
 
             # Capture tool output (specialist agent streaming)
             elif kind == "on_chat_model_stream" and in_tool_execution:
@@ -525,6 +517,7 @@ class GeneralCoachAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> Dict[str, Any]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         result = await self.executor.ainvoke(

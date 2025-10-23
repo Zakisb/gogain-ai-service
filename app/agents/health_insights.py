@@ -22,10 +22,6 @@ _DESCRIPTION = (
 _SYSTEM_PROMPT = """
 You are the HealthInsightsAgent for the GoGain virtual coach.
 
-**AVAILABLE TOOL:**
-- `get_current_date()`: Call this tool whenever you need the current date (YYYY-MM-DD format).
-  Use it for analyzing time-series health metrics, tracking trends, or dating insights.
-
 Tasks:
 1. Interpret time-series health metrics (sleep hours, HRV score, resting HR,
    step count) provided as JSON.
@@ -48,10 +44,8 @@ class HealthInsightsAgent:
     ) -> None:
         self.logger = logging.getLogger(__name__)
 
-        from app.tools.date_tool import get_date_tool
-
         # All tools are now native LangChain StructuredTool instances
-        self.tools = [get_date_tool()]
+        self.tools = []
 
         self.llm = llm or ChatOpenAI(
             model=DEFAULT_MODEL,
@@ -143,6 +137,7 @@ class HealthInsightsAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> AsyncIterator[Dict[str, Any]]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         inputs = {
@@ -166,11 +161,12 @@ class HealthInsightsAgent:
             elif kind == "on_tool_end":
                 output = data.get("output")
                 tool_name = event.get("name") or getattr(data.get("tool"), "name", None)
-                yield {
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": output,
-                }
+                if output:
+                    text_output = output if isinstance(output, str) else str(output)
+                    buffered = text_output.strip()
+                    if buffered:
+                        buffer.append(buffered)
+                        yield {"type": "text", "content": buffered}
 
             elif kind == "on_llm_end":
                 message = data.get("output")
@@ -203,6 +199,7 @@ class HealthInsightsAgent:
         self,
         context_messages: Iterable[Dict[str, Any]],
         user_input: str,
+        **_: Any,
     ) -> Dict[str, Any]:
         prompt_inputs = self._prepare_prompt_inputs(context_messages, user_input)
         result = await self.executor.ainvoke(

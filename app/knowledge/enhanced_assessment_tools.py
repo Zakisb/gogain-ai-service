@@ -59,7 +59,7 @@ def _mem0_context_key(user_id: str, body_region: str) -> str:
     return f"pain:mem0:{safe_user}:{safe_region}"
 
 
-def store_mem0_context(user_id: str, body_region: str, context: Dict[str, Any], ttl: int = 1800) -> None:
+def store_mem0_context(user_id: str, body_region: str, context: Dict[str, Any], ttl: int = 300) -> None:
     """Store Mem0 memory context in Redis for pain agent consumption.
 
     Args:
@@ -756,6 +756,19 @@ class EnhancedRAGAssessmentRetriever:
 
             nodes = retriever.retrieve(enriched_query)
 
+            # DEBUG: Inspect raw node regions before semantic filtering
+            try:
+                raw_regions = []
+                for n in nodes:
+                    meta = getattr(n, 'metadata', None) or {}
+                    raw_regions.append(meta.get('body_region', 'unknown'))
+                print(
+                    f"🔬 RETRIEVER RAW NODES: count={len(nodes)} regions={raw_regions} "
+                    f"for query='{enriched_query[:80]}...'"
+                )
+            except Exception as _ins_e:
+                print(f"⚠️ Failed to inspect raw node regions: {_ins_e}")
+
             # Apply semantic filtering and ranking
             filtered_results = self._apply_semantic_filtering(
                 nodes, body_region, search_for_questions, user_symptoms, priority
@@ -862,10 +875,12 @@ class EnhancedRAGAssessmentRetriever:
         for node in nodes:
             metadata = node.metadata or {}
 
-            # Filter by body region using normalized French values
+            # Filter by body region using normalized values
+            # NOTE: Temporarily disabled to avoid over-filtering during debugging.
+            # node_body_region = metadata.get("body_region", "general")
+            # if normalized_region != "general" and node_body_region not in [normalized_region, "general"]:
+            #     continue
             node_body_region = metadata.get("body_region", "general")
-            if normalized_region != "general" and node_body_region not in [normalized_region, "general"]:
-                continue
 
             # Calculate semantic relevance using all factors
             semantic_priority = self._calculate_semantic_priority(
@@ -1042,6 +1057,30 @@ def create_pain_summary_generator_tool() -> StructuredTool:
         user_id = _user_id_context.get()
         safe_user_id = re.sub(r"[^A-Za-z0-9._-]", "_", user_id or "unknown_user")
 
+        # Guardrail: ensure the RAG question queue has content before allowing conclusion
+        try:
+            queue_state = get_full_queue_state(user_id, body_region)
+            queued_questions = (queue_state or {}).get("questions") or []
+            if not queued_questions:
+                logger.warning(
+                    "⚠️ [Pain Summary] Queue empty for user=%s region=%s - summary blocked",
+                    user_id,
+                    body_region,
+                )
+                raise RuntimeError(
+                    "Pain assessment summary unavailable: RAG queue empty. Pose additional questions avant de conclure."
+                )
+        except Exception as queue_exc:
+            logger.warning(
+                "⚠️ [Pain Summary] Failed to verify queue state for user=%s region=%s: %s",
+                user_id,
+                body_region,
+                queue_exc,
+            )
+            raise RuntimeError(
+                "Pain assessment summary indisponible (questions RAG introuvables). Essaie de poser davantage de questions RAG."
+            ) from queue_exc
+
         print(f"🔥 OPENAI AGENT TOOL: generate_adaptive_pain_summary called")
         logger.warning(f"🔥 OPENAI AGENT TOOL: generate_adaptive_pain_summary called for {body_region}, user: {user_id}")
         print(f"🏁 ASSESSMENT COMPLETE - Summary tailored to available information")
@@ -1078,31 +1117,44 @@ def create_pain_summary_generator_tool() -> StructuredTool:
         # Let AI determine what other information to include based on the case
         summary["ai_completion_note"] = "Assessment completed based on available information quality and clinical judgment"
 
-        # Log pain summary to file in raw format
+        # Save pain summary to Mem0 (long-term memory)
         try:
-            # Create pain_summaries directory if it doesn't exist
-            log_dir = "pain_summaries"
-            os.makedirs(log_dir, exist_ok=True)
+            from app.core.memory import get_mem0_client
 
-            # Generate filename with timestamp and user_id
-            filename = (
-                "pain_summary_"
-                f"{safe_user_id}_"
-                f"{body_region.replace(' ', '_').replace('/', '_')}_"
-                f"{timestamp.strftime('%Y%m%d_%H%M%S')}"
-                ".json"
-            )
-            log_path = os.path.join(log_dir, filename)
-
-            # Write raw JSON to file
-            with open(log_path, 'w') as f:
-                f.write(json.dumps(summary, indent=2))
-
-            print(f"📁 Pain summary logged to: {log_path}")
-
+            mem0 = get_mem0_client()
+            if mem0:
+                message_text = json.dumps(summary, ensure_ascii=False)
+                metadata = {
+                    "type": "pain_assessment_summary",
+                    "category": "pain",
+                    "body_region": body_region,
+                }
+                result = mem0.add_memory(
+                    message=message_text,
+                    user_id=str(user_id),
+                    metadata=metadata,
+                )
+                if isinstance(result, dict) and result.get("success"):
+                    logger.info(
+                        "✅ [Mem0] Saved pain assessment summary for user=%s region=%s",
+                        user_id,
+                        body_region,
+                    )
+                else:
+                    err = (result or {}).get("error") if isinstance(result, dict) else "unknown error"
+                    logger.warning(
+                        "⚠️ [Mem0] Failed to save pain assessment summary for user=%s: %s",
+                        user_id,
+                        err,
+                    )
+            else:
+                logger.warning("⚠️ [Mem0] Client not initialised; pain summary not persisted for user=%s", user_id)
         except Exception as e:
-            print(f"⚠️ Failed to log pain summary to file: {e}")
-            # Continue anyway - logging failure shouldn't break the assessment
+            logger.warning(
+                "⚠️ [Mem0] Exception while saving pain summary for user=%s: %s",
+                user_id,
+                e,
+            )
 
         print(f"✅ Generated adaptive summary with {len(summary)} main components")
 
@@ -1696,13 +1748,10 @@ def get_enhanced_pain_assessment_tools() -> List[StructuredTool]:
     Queue contents are fed directly into agent context for inspiration.
     Agent manages questions autonomously based on conversation history.
     """
-    from app.tools.date_tool import get_date_tool
-
     tools = [
         create_llm_driven_rag_tool(),
         create_pain_summary_generator_tool(),
         create_pain_session_exit_tool(),
-        get_date_tool()
     ]
 
     return tools
