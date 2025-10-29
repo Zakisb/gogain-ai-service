@@ -602,9 +602,6 @@ def get_mem0_client() -> Optional[Mem0Client]:
     return _mem0_client
 
 
-mem0_client: Optional[Mem0Client] = None
-
-
 def _now_unix() -> float:
     return datetime.now(timezone.utc).timestamp()
 

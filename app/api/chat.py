@@ -16,13 +16,7 @@ from app.core.memory import get_mem0_client
 from app.core.session_manager import SessionManager
 from app.core.config import ENABLE_MEM0_MESSAGE_RETRIEVAL
 from app.core.cache import (
-    get_conversation_history as cache_get_conversation_history,
     add_conversation_message as cache_add_conversation_message,
-    start_pain_agent_session as cache_start_pain_agent_session,
-    add_to_pain_agent_session as cache_add_to_pain_agent_session,
-    get_pain_agent_session_history as cache_get_pain_agent_session_history,
-    end_pain_agent_session as cache_end_pain_agent_session,
-    is_pain_agent_session_active as cache_is_pain_agent_session_active,
     get_cached_user_memories,
     cache_user_memories,
     get_cached_user_profile,
@@ -74,56 +68,9 @@ async def get_agents() -> Tuple[GeneralCoachAgent, PainAssessmentAgent, Training
 router = APIRouter(prefix="/chat")
 legacy_router = APIRouter()
 
-
-
-
-async def get_cached_conversation_history(user_id: str, limit: int = 3):
-    """Get conversation history from Redis-backed cache (TTL-bound)."""
-    history = await cache_get_conversation_history(user_id, limit)
-    if history:
-        logger.info(
-            f"🎯 Cache HIT - Using cached history for {user_id} ({len(history)} messages)"
-        )
-    else:
-        logger.info(
-            f"💨 Cache MISS - Starting new conversation for {user_id} (no API calls)"
-        )
-    return history
-
-
 async def add_to_conversation_cache(user_id: str, message: str, role: str):
     """Add message to Redis cache (keeps last N, refreshes TTL)."""
     await cache_add_conversation_message(user_id, message, role)
-
-
-async def start_pain_agent_session(user_id: str):
-    """Start a fresh isolated pain agent session for a user (Redis-backed)."""
-    await cache_start_pain_agent_session(user_id)
-    logger.info(f"🔴 Started fresh pain agent session for {user_id}")
-
-
-async def add_to_pain_agent_session(user_id: str, message: str, role: str):
-    """Add message to isolated pain agent session (Redis-backed)."""
-    await cache_add_to_pain_agent_session(user_id, message, role)
-    logger.info(f"🔴 Added {role} message to pain session for {user_id}")
-
-
-async def get_pain_agent_session_history(user_id: str) -> List[Dict[str, str]]:
-    """Get isolated pain agent session history (Redis-backed)."""
-    return await cache_get_pain_agent_session_history(user_id)
-
-
-async def end_pain_agent_session(user_id: str):
-    """Mark pain agent session as ended (Redis-backed)."""
-    await cache_end_pain_agent_session(user_id)
-    logger.info(f"🔴 Ended pain agent session for {user_id}")
-
-
-async def is_pain_agent_session_active(user_id: str) -> bool:
-    """Check if pain agent session is active for user (Redis-backed)."""
-    return await cache_is_pain_agent_session_active(user_id)
-
-
 # REMOVED: extract_body_region_from_message - keyword matching violates CLAUDE.md principle
 # The LLM now intelligently chooses body_region via tool parameters based on user's description
 
@@ -879,30 +826,6 @@ def _split_for_frontend_chunks(text: str, just_emitted_backticks: bool) -> (List
             chunks.append(text[start:i])
 
     return chunks, just_emitted_backticks
-
-
-def unwrap_pain_agent_response(response_text: str) -> str:
-    """Pass-through function for pain agent responses.
-
-    The pain agent now outputs frontend-compatible format directly, so no transformation is needed.
-    This function is kept for backwards compatibility and potential future processing needs.
-
-    Frontend expects questions in this format:
-    <question_text>
-    ```json
-    {"id": "option1", "label": "First option"}
-    {"id": "option2", "label": "Second option"}
-    ```
-
-    Args:
-        response_text: The response from pain agent (already in frontend format)
-
-    Returns:
-        The response text as-is (already formatted correctly)
-    """
-    # Pain agent now outputs frontend format directly - no transformation needed
-    logger.info(f"✅ Pain agent response already in frontend format ({len(response_text)} chars)")
-    return response_text.strip()
 
 
 @legacy_router.post("/virtual-coach/chat")

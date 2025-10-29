@@ -109,6 +109,54 @@ The hierarchical embedding system will:
 
 - `POST /virtual-coach/chat` - Primary streaming chat endpoint with tool calls (production)
 
+#### Virtual Coach: user-id-only flow
+
+This endpoint is designed for frontend clients that only know the authenticated user id and the latest user message. The server fetches and injects all relevant context (profile, memories, training snapshot) automatically, then routes to the right agent and streams the answer.
+
+- Path: `/virtual-coach/chat` (also available at `/api/v1/chat/virtual-coach/chat` when mounted under the API prefix)
+- Method: `POST`
+- Content-Type: `application/json`
+- Request body:
+  - `userId` (string | number, required): The numeric app user id. Non‑numeric identifiers (emails) are rejected for profile/training lookups.
+  - `message` (string, required): The user’s latest utterance.
+  - `conversationHistory` (array, optional): Optional prior turns for UI compatibility; server relies on its own session memory.
+
+Minimal example request:
+
+```bash
+curl -N -X POST http://localhost:8000/chat/virtual-coach/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"userId": 54, "message": "J\u2019ai mal \u00e0 l\u2019\u00e9paule depuis 2 semaines"}'
+```
+
+Streaming response format is Server-Sent Events (SSE) with frames shaped as:
+
+```text
+data: {"type":"text_delta","content":"..."}
+
+data: {"type":"final","content":"..."}
+
+```
+
+Key behaviors (from `app/api/chat.py`):
+- Agent routing: The GeneralCoachAgent decides whether to answer directly or route to PainAssessmentAgent or TrainingAgent.
+- Automatic context: On each turn the server pulls and caches user profile, Mem0 memories, and a condensed training program snapshot; these are injected as system context for better personalization.
+- Memory: Mem0 memories are fetched once per window and cached; new useful facts from general QA are written back to Mem0.
+- Fast start: First token is streamed quickly; tool results are not echoed to the user stream.
+- Completion handling: Specialist sessions (pain/training) auto‑close when completion is detected, resetting that specialist context.
+
+Optional prefetch to ensure a fast first turn:
+
+```bash
+curl -X POST http://localhost:8000/chat/prefetch-user-context \
+  -H 'Content-Type: application/json' \
+  -d '{"userId": 54}'
+```
+
+Notes:
+- Always call the virtual‑coach endpoint for production testing; legacy endpoints remain but should not be modified.
+- The server streams with proper SSE headers and chunked transfer encoding; keep the HTTP connection open on the client and append `text_delta` chunks to your UI while waiting for `final`.
+
 ### Testing the API
 
 - run the coach.py file for testing, will route to any agent, supports all features rag/memory/agents
@@ -239,6 +287,5 @@ Once the service is running, visit http://localhost:8000/docs for interactive AP
 - The rag is always called in the background so it doesnt cause delays or ruin the user experience
 - fitness goals and pain assessments are stored in memory
 - the .env file has a  ENABLE_MEM0_MESSAGE_RETRIEVAL it enables search and retrieval from memory everytime the user sends a message, by default its set to false for performance but it can be set to TRUE if there is no major delays caused by it, (the advantage of it is when the conversations get long mem0 gets a lot of context so its a way to filter out what we retrieve rather than dumping all the memories into the agent's context.
-
 
 
