@@ -10,6 +10,7 @@ from app.api.chat import (
     legacy_router as vc_legacy_router,
     warmup_agents,
 )
+from app.api.transcription import router as transcription_router
 from app.core.redis_client import get_redis   # Redis client for caches
 from app.core.prisma_client import ensure_client_connected
 from app.core.database import execute_query, close_pool
@@ -80,6 +81,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(chat_router, prefix="/api/v1", tags=["Chat"])
 # adding virtual coach router
 app.include_router(vc_legacy_router, tags=["Virtual Coach"])
+app.include_router(transcription_router, tags=["Virtual Coach"])
 
 
 # Define a path operation decorator for the root endpoint ("/")

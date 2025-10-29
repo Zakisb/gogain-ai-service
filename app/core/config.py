@@ -14,6 +14,10 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # Add other keys as needed (COHERE_API_KEY, etc.)
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# --- Audio transcription ---
+TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "whisper-1")
+TRANSCRIPTION_UPLOAD_DIR = os.getenv("TRANSCRIPTION_UPLOAD_DIR", "uploads")
+
 # --- Application Settings ---
 APP_TITLE = "GoGain AI Coach Service"
 APP_DESCRIPTION = "API endpoints for the AI Virtual Coach powered by LlamaIndex & OpenAI"

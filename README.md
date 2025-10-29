@@ -54,6 +54,10 @@ OPENAI_API_KEY=your_openai_api_key
 VOYAGE_API_KEY=your_voyage_api_key
 MEM0_API_KEY=your_mem0_api_key  # Optional
 
+# Audio transcription (optional overrides)
+TRANSCRIPTION_MODEL=whisper-1
+TRANSCRIPTION_UPLOAD_DIR=uploads
+
 # Model Configuration
 
 # Qdrant Configuration (handled by docker-compose)
@@ -108,6 +112,7 @@ The hierarchical embedding system will:
 ### Main Endpoints
 
 - `POST /virtual-coach/chat` - Primary streaming chat endpoint with tool calls (production)
+- `POST /virtual-coach/transcribe-audio` - Legacy-compatible audio transcription (multipart/form-data)
 
 #### Virtual Coach: user-id-only flow
 
@@ -127,6 +132,21 @@ Minimal example request:
 curl -N -X POST http://localhost:8000/chat/virtual-coach/chat \
   -H 'Content-Type: application/json' \
   -d '{"userId": 54, "message": "J\u2019ai mal \u00e0 l\u2019\u00e9paule depuis 2 semaines"}'
+```
+
+#### Virtual Coach: Audio Transcription
+
+- Path: `/virtual-coach/transcribe-audio`
+- Method: `POST`
+- Content-Type: `multipart/form-data`
+- Field name: `audio`
+- Response: `{ "transcription": "<text>" }`
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8000/virtual-coach/transcribe-audio \
+  -F "audio=@/path/to/sample.wav"
 ```
 
 Streaming response format is Server-Sent Events (SSE) with frames shaped as:
@@ -287,5 +307,3 @@ Once the service is running, visit http://localhost:8000/docs for interactive AP
 - The rag is always called in the background so it doesnt cause delays or ruin the user experience
 - fitness goals and pain assessments are stored in memory
 - the .env file has a  ENABLE_MEM0_MESSAGE_RETRIEVAL it enables search and retrieval from memory everytime the user sends a message, by default its set to false for performance but it can be set to TRUE if there is no major delays caused by it, (the advantage of it is when the conversations get long mem0 gets a lot of context so its a way to filter out what we retrieve rather than dumping all the memories into the agent's context.
-
-

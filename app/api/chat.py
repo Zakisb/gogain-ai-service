@@ -1415,11 +1415,4 @@ async def create_openai_thread():
     return {"data": {"threadId": thread_id}}
 
 
-@legacy_router.post("/virtual-coach/transcribe-audio")
-async def transcribe_audio(file: UploadFile = File(...)):
-    """Accept audio and return a transcription string (compat stub)."""
-    try:
-        name = getattr(file, "filename", "audio") or "audio"
-        return {"transcription": f"[stub] Received {name}. Configure ASR to enable transcription."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+# Transcription route moved to app/api/transcription.py to keep this file lean
