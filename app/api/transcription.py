@@ -23,9 +23,14 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
 
 # ✅ Now safe to import config — vars will be populated
 from app.core.config import OPENAI_API_KEY, TRANSCRIPTION_MODEL, TRANSCRIPTION_UPLOAD_DIR
-from app.api.chat import VirtualCoachChatRequest, handle_virtual_coach_chat
+from app.api.chat import (
+    VirtualCoachChatRequest,
+    handle_virtual_coach_chat,
+    emit_vc_event,
+)
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, Request
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
 
 # ------------------------------------------------------------------------------
@@ -122,7 +127,24 @@ async def transcribe_audio(
                 message=transcription_text,
                 conversationHistory=conversation_history or [],
             )
-            return await handle_virtual_coach_chat(vc_request)
+            chat_response = await handle_virtual_coach_chat(vc_request)
+
+            body_iterator = chat_response.body_iterator
+
+            async def combined_stream():
+                yield emit_vc_event("transcription", transcription_text)
+                if body_iterator is not None:
+                    async for chunk in body_iterator:
+                        yield chunk
+
+            headers_dict = dict(chat_response.headers.items()) if chat_response.headers else {}
+            return StreamingResponse(
+                combined_stream(),
+                status_code=chat_response.status_code,
+                media_type=chat_response.media_type,
+                headers=headers_dict,
+                background=chat_response.background,
+            )
 
         # Legacy compatibility: return transcript when no user id is supplied
         return {"transcription": transcription_text}
