@@ -1,6 +1,6 @@
 """LangChain-powered chat endpoint orchestrated by the general coach agent."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
@@ -71,8 +71,7 @@ legacy_router = APIRouter()
 async def add_to_conversation_cache(user_id: str, message: str, role: str):
     """Add message to Redis cache (keeps last N, refreshes TTL)."""
     await cache_add_conversation_message(user_id, message, role)
-# REMOVED: extract_body_region_from_message - keyword matching violates CLAUDE.md principle
-# The LLM now intelligently chooses body_region via tool parameters based on user's description
+
 
 
 async def get_or_fetch_user_memories(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
